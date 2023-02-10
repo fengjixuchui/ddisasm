@@ -61,10 +61,10 @@ Each is used for the following forms:
 memory_access(AccessType,EA,SrcIdx,DstIdx,Rt,Rn,"NONE",0,Offset):-
     instruction(EA,_,_,Operation,Op1,Op2,0,0,_,_),
     (
-        (contains("LDM", Operation); contains("POP", Operation)),
+        contains("LDM",Operation),
         AccessType = "LOAD", SrcIdx = 2, DstIdx = 1
         ;
-        (contains("STM", Operation); contains("PUSH", Operation)),
+        contains("STM",Operation),
         AccessType = "STORE", SrcIdx = 1, DstIdx = 2
     ),
     op_register_bitfield(Op1,Index,RtIn),
@@ -73,15 +73,31 @@ memory_access(AccessType,EA,SrcIdx,DstIdx,Rt,Rn,"NONE",0,Offset):-
     arch.pointer_size(Pt_size),
     Offset = as(Index * Pt_size, number).
 
+/**
+Build operation substrings for aggregated access types.
+
+Previously, we used regex "match" functor with "VLD[1-4].*" and "VST[1-4].*".
+However, it was very slow. When this Souffle PR is merged, we can evaluate
+that again.
+
+https://github.com/souffle-lang/souffle/pull/2328
+*/
+.decl aggregated_access_operation(OperationPrefix:symbol,AccessType:symbol)
+
+aggregated_access_operation(OperationPrefix,AccessType):-
+    I = range(1,5),
+    (
+        OperationBase = "VLD", AccessType = "LOAD";
+        OperationBase = "VST", AccessType = "STORE"
+    ),
+    OperationPrefix = cat(OperationBase,to_string(I),".").
+
 memory_access_aggregated(AccessType,EA,Rn,"NONE",0,0,AccessSize):-
     instruction(EA,_,_,Operation,Op1,BitFieldOp,0,0,_,_),
-    (
-        match("VLD[1-4].*",Operation), AccessType = "LOAD"
-        ;
-        match("VST[1-4].*",Operation), AccessType = "STORE"
-    ),
     op_register_bitfield(BitFieldOp,MaxIndex,RtIn),
     !op_register_bitfield(BitFieldOp,MaxIndex+1,_),
+    aggregated_access_operation(OperationPrefix,AccessType),
+    OperationPrefix = substr(Operation,0,strlen(OperationPrefix)),
     RegCnt = MaxIndex + 1,
     reg_map(RtIn,Rt),
     float_reg(Rt, RegSize),
@@ -90,18 +106,60 @@ memory_access_aggregated(AccessType,EA,Rn,"NONE",0,0,AccessSize):-
 
 memory_access_aggregated(AccessType,EA,Rn,"NONE",0,0,AccessSize):-
     instruction(EA,_,_,Operation,Op1,_,BitFieldOp,0,_,_),
-    (
-        match("VLD[1-4].*",Operation), AccessType = "LOAD"
-        ;
-        match("VST[1-4].*",Operation), AccessType = "STORE"
-    ),
     op_register_bitfield(BitFieldOp,MaxIndex,RtIn),
     !op_register_bitfield(BitFieldOp,MaxIndex+1,_),
+    aggregated_access_operation(OperationPrefix,AccessType),
+    OperationPrefix = substr(Operation,0,strlen(OperationPrefix)),
     RegCnt = MaxIndex + 1,
     reg_map(RtIn,Rt),
     float_reg(Rt, RegSize),
     op_indirect_mapped(Op1,_,Rn,"NONE",_,_,_),
     AccessSize = RegCnt * RegSize.
+
+memory_access(AccessType,EA,SrcIdx,DstIdx,Rt,"SP","NONE",0,Offset):-
+    instruction(EA,_,_,Operation,Op,0,0,0,_,_),
+    (
+        contains("POP",Operation),
+        AccessType = "LOAD",
+        SrcIdx = 0, /* no source operand */
+        DstIdx = 1
+        ;
+        contains("PUSH",Operation),
+        AccessType = "STORE",
+        SrcIdx = 1,
+        DstIdx = 0 /* no dest operand */
+    ),
+    op_register_bitfield(Op,Index,RtIn),
+    reg_map(RtIn,Rt),
+    arch.pointer_size(Pt_size),
+    Offset = as(Index * Pt_size, number).
+
+/**
+Shift types that cannot be represented as multiplication
+*/
+.decl non_mult_shift_type(Type:symbol)
+
+non_mult_shift_type("ASR").
+non_mult_shift_type("LSR").
+non_mult_shift_type("ROR").
+non_mult_shift_type("RRX").
+
+/**
+At EA, an indirect operand Op has a shift that cannot be represented as
+multiplication.
+*/
+.decl non_mult_shift(EA:address,Op:operand_code)
+
+// Immediate shift types that are not mult
+non_mult_shift(EA,Op):-
+    op_shifted(EA,Index,_,Type),
+    non_mult_shift_type(Type),
+    instruction_get_op(EA,Index,Op).
+
+// Register shifts
+non_mult_shift(EA,Op):-
+    op_shifted_w_reg(EA,Index,_,_),
+    instruction_get_op(EA,Index,Op).
 
 // Single-word operations
 
@@ -114,6 +172,7 @@ memory_access(AccessType,EA,SrcIdx,DstIdx,Rt,Rn,Rm,Mult,Offset):-
     ),
     op_regdirect_contains_reg(Op2,Rt),
     op_indirect_mapped(Op1,_,Rn,Rm,Scale,Offset,_),
+    !non_mult_shift(EA,Op1),
     reg_nonnull(Rn,_),
     (
         Rm = "NONE", Mult = 0, Scale = Scale;
@@ -131,6 +190,7 @@ reg_arithmetic_operation(EA,Rn_nn,Rn_nn,1,Offset):-
     op_regdirect_contains_reg(Op3,Rt),
     instruction_writeback(EA),
     op_indirect_mapped(Op1,_,Rn,"NONE",_,0,_),
+    !non_mult_shift(EA,Op1),
     reg_nonnull(Rn,Rn_nn),
     op_immediate(Op2,Offset).
 
@@ -145,6 +205,7 @@ reg_reg_arithmetic_operation(EA,Rn_nn,Rn_nn,Rm,1,0):-
     op_regdirect_contains_reg(Op3,Rt),
     instruction_writeback(EA),
     op_indirect_mapped(Op1,_,Rn,"NONE",_,0,_),
+    !non_mult_shift(EA,Op1),
     reg_nonnull(Rn,Rn_nn),
     op_regdirect_contains_reg(Op2,Rm).
 
@@ -161,6 +222,7 @@ memory_access(AccessType,EA,SrcIdx2,DstIdx2,Rt2,Rn,Rm,Mult,Offset+4):-
     op_regdirect_contains_reg(Op3,Rt),
     op_regdirect_contains_reg(Op1,Rt2),
     op_indirect_mapped(Op2,_,Rn,Rm,Scale,Offset,_),
+    !non_mult_shift(EA,Op2),
     reg_nonnull(Rn,_),
     (
         Rm = "NONE", Mult = 0, Scale = Scale;
@@ -180,6 +242,7 @@ reg_arithmetic_operation(EA,Rn_nn,Rn_nn,1,Offset):-
     op_regdirect_contains_reg(Op1,Rt2),
     instruction_writeback(EA),
     op_indirect_mapped(Op2,_,Rn,"NONE",_,0,_),
+    !non_mult_shift(EA,Op2),
     reg_nonnull(Rn,Rn_nn),
     op_immediate(Op3,Offset).
 
@@ -196,6 +259,7 @@ reg_reg_arithmetic_operation(EA,Rn_nn,Rn_nn,Rm,1,0):-
     op_regdirect_contains_reg(Op1,Rt2),
     instruction_writeback(EA),
     op_indirect_mapped(Op2,_,Rn,"NONE",_,0,_),
+    !non_mult_shift(EA,Op2),
     reg_nonnull(Rn,Rn_nn),
     op_regdirect_contains_reg(Op3,Rm).
 

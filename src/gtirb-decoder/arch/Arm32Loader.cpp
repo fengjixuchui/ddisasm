@@ -26,63 +26,105 @@
 #include <string>
 #include <vector>
 
-void Arm32Loader::load(const gtirb::Module& Module, const gtirb::ByteInterval& ByteInterval,
-                       BinaryFacts& Facts)
+const std::set<std::string> Versions = {
+    "Pre_v4", "v4",        "v4T",       "v5T",         "v5TE",  "v5TEJ", "v6",
+    "v6KZ",   "v6K",       "v7",        "v6_M",        "v6S_M", "v7E_M", "v8_A",
+    "v8_R",   "v8_M_Base", "v8_M_Main", "v8_1_M_Main", "v9_A",
+};
+const std::set<std::string> VNoThumb = {"Pre_v4", "v4"};
+
+void Arm32Loader::initCsModes(const gtirb::Module& Module)
 {
-    // For Thumb, check if the arch type is available.
-    // For Cortex-M, add CS_MODE_MCLASS to the cs option.
+    bool ProfileInArchInfo = false;
+    std::string Profile;
+    bool VersionSupportsThumb = true;
     auto* ArchInfo = Module.getAuxData<gtirb::schema::ArchInfo>();
     if(ArchInfo)
     {
-        ArchInfoExists = !ArchInfo->empty();
-        if(std::find(ArchInfo->begin(), ArchInfo->end(), "Microcontroller") != ArchInfo->end())
+        auto ProfileIt = ArchInfo->find("Profile");
+        if(ProfileIt != ArchInfo->end())
         {
-            Mclass = true;
+            ProfileInArchInfo = true;
+            Profile = ProfileIt->second;
+        }
+
+        auto ArchIt = ArchInfo->find("Arch");
+        if(ArchIt != ArchInfo->end() && (VNoThumb.count(ArchIt->second) > 0))
+        {
+            VersionSupportsThumb = false;
         }
     }
 
-    // In case of MCLASS (Microcontroller), no need to decode in ARM state.
-    if(!Mclass)
+    // Execution modes are ARM or Thumb.
+    std::vector<size_t> ExecutionModes;
+    if(!ProfileInArchInfo || Profile != "Microcontroller")
     {
-        CsModes.clear();
-        CsModes.push_back(CS_MODE_ARM | CS_MODE_V8);
-
-        // NOTE: AArch32 (ARMv8-A) is backward compatible to ARMv7-A.
-        cs_option(*CsHandle, CS_OPT_MODE, CS_MODE_ARM | CS_MODE_V8);
-        InstructionSize = 4;
-        load(ByteInterval, Facts, false);
+        // The ARM Microcontroller profile does not support ARM mode.
+        ExecutionModes.push_back(CS_MODE_ARM);
+    }
+    if(VersionSupportsThumb)
+    {
+        ExecutionModes.push_back(CS_MODE_THUMB);
     }
 
-    CsModes.clear();
-    if(ArchInfoExists)
+    for(size_t ExecutionMode : ExecutionModes)
     {
-        if(Mclass)
+        // Modifiers: CS_MODE_MCLASS
+        std::vector<size_t> Modifiers;
+        if(ExecutionMode == CS_MODE_ARM)
         {
-            CsModes.push_back(CS_MODE_THUMB | CS_MODE_V8 | CS_MODE_MCLASS);
+            Modifiers.push_back(0);
         }
         else
         {
-            CsModes.push_back(CS_MODE_THUMB | CS_MODE_V8);
+            if(ProfileInArchInfo)
+            {
+                // Only use the known profile
+                Modifiers.push_back(Profile == "Microcontroller" ? CS_MODE_MCLASS : 0);
+            }
+            else
+            {
+                // If the ARM CPU profile is not known, we may have to toggle
+                // CS_MODE_MCLASS to successfully decode all instructions.
+                // Thumb2 MRS and MSR instructions support a larger set of `<spec_reg>` on
+                // M-profile devices, so they do not decode without CS_MODE_MCLASS.
+                // The Thumb 'blx label' instruction does not decode with CS_MODE_MCLASS,
+                // because it is not a supported instruction on M-profile devices.
+                Modifiers.push_back(0);
+                Modifiers.push_back(CS_MODE_MCLASS);
+            }
+        }
+
+        for(size_t Modifier : Modifiers)
+        {
+            // Always try both with and without CS_MODE_V8.
+            // We'd like to use the version from ArchInfo to decide this when
+            // present, but capstone seems to be missing some pre-V8
+            // instructions without CS_MODE_V8. For example, "vcvt.f64.u32"
+            // (40 0b f8 ee) is a valid Advanced SIMD instruction according to
+            // "ARM Architecture Reference Manual ARMv7-A and ARMv7-R edition"
+            // and has been observed in binaries with v7 defined in arch info,
+            // but capstone only decodes it successfully with CS_MODE_V8.
+            // CS_MODE_V8 is also not a strict superset of v7; the instruction
+            // "ldcl p1, c0, [r0], #8" (02 01 f0 ec) is valid only without
+            // CS_MODE_V8.
+            CsModes[ExecutionMode].push_back(ExecutionMode | Modifier | CS_MODE_V8);
+            CsModes[ExecutionMode].push_back(ExecutionMode | Modifier);
         }
     }
-    else
-    {
-        if(Mclass)
-        {
-            CsModes.push_back(CS_MODE_THUMB | CS_MODE_V8 | CS_MODE_MCLASS);
-            CsModes.push_back(CS_MODE_THUMB | CS_MODE_V8);
-        }
-        else
-        {
-            CsModes.push_back(CS_MODE_THUMB | CS_MODE_V8);
-            CsModes.push_back(CS_MODE_THUMB | CS_MODE_V8 | CS_MODE_MCLASS);
-        }
-    }
-    InstructionSize = 2;
-    load(ByteInterval, Facts, true);
 }
 
-void Arm32Loader::load(const gtirb::ByteInterval& ByteInterval, BinaryFacts& Facts, bool Thumb)
+void Arm32Loader::load(const gtirb::Module& Module, const gtirb::ByteInterval& ByteInterval,
+                       BinaryFacts& Facts)
+{
+    for(auto&& [ExecutionMode, CurrentCsModes] : CsModes)
+    {
+        load(ByteInterval, Facts, ExecutionMode, CurrentCsModes);
+    }
+}
+
+void Arm32Loader::load(const gtirb::ByteInterval& ByteInterval, BinaryFacts& Facts,
+                       size_t ExecutionMode, const std::vector<size_t>& CsModes)
 {
     assert(ByteInterval.getAddress() && "ByteInterval is non-addressable.");
 
@@ -91,73 +133,64 @@ void Arm32Loader::load(const gtirb::ByteInterval& ByteInterval, BinaryFacts& Fac
     auto Data = ByteInterval.rawBytes<const uint8_t>();
 
     // Thumb instruction candidates are distinguished by the least significant bit (1).
-    if(Thumb)
+    if(ExecutionMode == CS_MODE_ARM)
     {
+        MinInstructionSize = 4;
+    }
+    else
+    {
+        MinInstructionSize = 2;
         Addr++;
     }
 
-    while(Size >= InstructionSize)
+    while(Size >= MinInstructionSize)
     {
-        decode(Facts, Data, Size, Addr);
-        Addr += InstructionSize;
-        Data += InstructionSize;
-        Size -= InstructionSize;
+        decode(Facts, Data, Size, Addr, CsModes);
+        Addr += MinInstructionSize;
+        Data += MinInstructionSize;
+        Size -= MinInstructionSize;
     }
 }
 
-void Arm32Loader::decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size, uint64_t Addr)
+void Arm32Loader::decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size, uint64_t Addr,
+                         const std::vector<size_t>& CsModes)
 {
-    std::unique_ptr<cs_insn, std::function<void(cs_insn*)>> InsnPtr;
     size_t InsnCount = 0;
 
-    // NOTE: If the ARM CPU profile is not known, we may have to switch modes
-    // to successfully decode all instructions.
-    // Thumb2 MRS and MSR instructions support a larger set of `<spec_reg>` on
-    // M-profile devices, so they do not decode without CS_MODE_MCLASS.
-    // The Thumb 'blx label' instruction does not decode with CS_MODE_MCLASS,
-    // because it is not a supported instruction on M-profile devices.
-    //
-    // This loop is to try out multiple CS modes to see if decoding succeeds.
-    // Currently, this is done only when the arch type info is not available.
+    // This loop is to try out multiple CS modes until decoding succeeds.
+    // This generates a superset of all decoding options, assuming the same
+    // bytes do not decode to two different results on different modes.
     bool Success = false;
     OpndFactsT OpndFacts;
-    for(auto It = CsModes.begin(); It != CsModes.end(); It++)
+    std::unique_ptr<cs_insn, std::function<void(cs_insn*)>> Insn;
+    for(size_t CsMode : CsModes)
     {
-        size_t CsMode = *It;
-        // Decode instruction with Capstone.
-        cs_insn* Insn;
         cs_option(*CsHandle, CS_OPT_MODE, CsMode);
-        size_t TmpCount = cs_disasm(*CsHandle, Bytes, Size, Addr, 1, &Insn);
-
-        // Exception-safe cleanup of instructions
-        std::unique_ptr<cs_insn, std::function<void(cs_insn*)>> TmpInsnPtr(
-            Insn, [TmpCount](cs_insn* Instr) { cs_free(Instr, TmpCount); });
-
-        if(TmpCount > 0)
-        {
-            OpndFacts.clear();
-            Success = collectOpndFacts(OpndFacts, Insn[0]);
-        }
+        cs_insn* TmpInsnRaw = nullptr;
+        size_t Count = cs_disasm(*CsHandle, Bytes, Size, Addr, 1, &TmpInsnRaw);
+        Success = Count > 0;
+        std::unique_ptr<cs_insn, std::function<void(cs_insn*)>> TmpInsn(
+            TmpInsnRaw, [Count](cs_insn* Instr) { cs_free(Instr, Count); });
 
         if(Success)
         {
-            InsnPtr = std::move(TmpInsnPtr);
-            InsnCount = TmpCount;
-            if((CsMode & CS_MODE_MCLASS) != 0)
+            OpndFacts.clear();
+            Success = collectOpndFacts(OpndFacts, *TmpInsnRaw);
+            Insn = std::move(TmpInsn);
+            if(Success)
             {
-                Mclass = true;
+                break;
             }
-            break;
         }
     }
 
     if(Success)
     {
         // Build datalog instruction facts from Capstone instruction.
-        build(Facts, (&(*InsnPtr))[InsnCount - 1], OpndFacts);
-        loadRegisterAccesses(Facts, Addr, (&(*InsnPtr))[InsnCount - 1]);
+        build(Facts, *Insn, OpndFacts);
+        loadRegisterAccesses(Facts, Addr, *Insn);
 
-        if(InsnPtr->detail->arm.update_flags)
+        if((*Insn).detail->arm.update_flags)
         {
             // Capstone bug: for some instructions, "CPSR" is missing from regs_write even when
             // update_flags is set.
@@ -334,26 +367,32 @@ bool Arm32Loader::collectOpndFacts(OpndFactsT& OpndFacts, const cs_insn& CsInst)
             if(CsOp.shift.type != ARM_SFT_INVALID && CsOp.shift.value != 0)
             {
                 std::string ShiftType;
+                bool IsRegShift = false;
                 switch(CsOp.shift.type)
                 {
-                    case ARM_SFT_ASR:
                     case ARM_SFT_ASR_REG:
+                        IsRegShift = true;
+                    case ARM_SFT_ASR:
                         ShiftType = "ASR";
                         break;
-                    case ARM_SFT_LSL:
                     case ARM_SFT_LSL_REG:
+                        IsRegShift = true;
+                    case ARM_SFT_LSL:
                         ShiftType = "LSL";
                         break;
-                    case ARM_SFT_LSR:
                     case ARM_SFT_LSR_REG:
+                        IsRegShift = true;
+                    case ARM_SFT_LSR:
                         ShiftType = "LSR";
                         break;
-                    case ARM_SFT_ROR:
                     case ARM_SFT_ROR_REG:
+                        IsRegShift = true;
+                    case ARM_SFT_ROR:
                         ShiftType = "ROR";
                         break;
-                    case ARM_SFT_RRX:
                     case ARM_SFT_RRX_REG:
+                        IsRegShift = true;
+                    case ARM_SFT_RRX:
                         ShiftType = "RRX";
                         break;
                     case ARM_SFT_INVALID:
@@ -361,7 +400,7 @@ bool Arm32Loader::collectOpndFacts(OpndFactsT& OpndFacts, const cs_insn& CsInst)
                                   << "\n";
                         return false;
                 }
-                if(CsOp.shift.value > 32)
+                if(IsRegShift)
                 {
                     OpndFacts.ShiftedWithRegOp =
                         relations::ShiftedWithRegOp{Addr, static_cast<uint8_t>(i + 1),
@@ -443,20 +482,17 @@ std::optional<relations::Operand> Arm32Loader::build(const cs_insn& CsInsn, cons
             return ImmOp{CsOp.imm};
         case ARM_OP_MEM:
         {
-            // CsOp.mem.lshift seems to be incorrect for some instructions,
-            // see: https://github.com/capstone-engine/capstone/issues/1848
-            // The lshift value can also be fetched via op.shift.value.
-            // Therefore, we use op.shift.value here instead.
-            //
-            // LDR instructions support ASR, LSL, LSR, ROR, and RRX shifts.
-            // Only LSL can be represented as a multiplier.
-            // Therefore, we carry the LSL info in op_indirect rules.
-            // For other types of shifts, we use ShiftedOp.
-            if(CsOp.shift.value && CsOp.shift.type != ARM_SFT_LSL)
-                std::cerr << "WARNING: Unhandled shift type in mem operand ("
-                          << "address=0x" << std::hex << CsInsn.address << std::dec << ", "
-                          << "value=0x" << std::hex << CsOp.shift.value << std::dec << ", "
-                          << "type=" << CsOp.shift.type << ")\n";
+            // We translate LSL shifts into a Mult in op_indirect.
+            // Other shifts must be verified with op_shifted.
+            uint32_t LShiftMult = 1;
+            if(CsOp.shift.type == ARM_SFT_LSL)
+            {
+                // CsOp.mem.lshift seems to be incorrect for some instructions,
+                // see: https://github.com/capstone-engine/capstone/issues/1848
+                // The lshift value can also be fetched via op.shift.value.
+                // Therefore, we use op.shift.value here instead.
+                LShiftMult = 1 << CsOp.shift.value;
+            }
 
             // Capstone does not provide a way of accessing the size of
             // the memory reference.
@@ -470,7 +506,7 @@ std::optional<relations::Operand> Arm32Loader::build(const cs_insn& CsInsn, cons
             IndirectOp I = {registerName(ARM_REG_INVALID),
                             registerName(CsOp.mem.base),
                             registerName(CsOp.mem.index),
-                            CsOp.mem.scale * (1 << CsOp.shift.value),
+                            CsOp.mem.scale * LShiftMult,
                             CsOp.mem.disp,
                             32};
             return I;

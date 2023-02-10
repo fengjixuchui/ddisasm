@@ -33,7 +33,7 @@ ddisasm examples/ex1/ex --asm ex.s
 The generated assembly can then be rebuilt with gcc:
 
 ```
-gcc ex.s -o ex_rewritten
+gcc -nostartfiles ex.s -o ex_rewritten
 ```
 
 ## Installing
@@ -57,7 +57,7 @@ To build ddisasm from source, the following requirements should be installed:
 - [Souffle](https://souffle-lang.github.io), version 2.3
   - Must be configured with support for 64 bit numbers (via `-DSOUFFLE_DOMAIN_64BIT=1` during configuration)
 - [libehp](https://git.zephyr-software.com/opensrc/libehp), version 1.0.0 or higher
-- [LIEF](https://lief.quarkslab.com/), version 0.12.1 or higher
+- [LIEF](https://lief.quarkslab.com/), version 0.12.3 or higher
 
 Note that these versions are newer than what your package manager may provide
 by default: This is true on Ubuntu 18, Debian 10, and others. Prefer building
@@ -148,7 +148,7 @@ Ddisasm accepts the following parameters:
 :   Skip additional analyses to compute more precise function boundaries.
 
 `-j [ --threads ]`
-:   Number of cores to use. It is set to the number of cores in the machine by default.
+:   Number of cores to use.
 
 `-I [ --interpreter ] arg`
 :   Execute the Souffle interpreter with the specified source file.

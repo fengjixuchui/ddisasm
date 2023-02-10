@@ -34,6 +34,8 @@ and characteristics
 #include "registers.dl"
 #include "memory_access.dl"
 
+arch("ARM").
+
 move_operation(Operation) :-
     instruction_get_operation(_, Operation),
     contains("MOV", Operation).
@@ -56,18 +58,18 @@ load_word_operation(Operation):-
         condition_code_map(Suffix,_)
     ).
 
-data_access_size("LDRD",DestReg,8):-
-    op_regdirect_contains_reg(_,DestReg).
-data_access_size("LDR",DestReg,4):-
-    op_regdirect_contains_reg(_,DestReg).
-data_access_size("LDRSB",DestReg,1):-
-    op_regdirect_contains_reg(_,DestReg).
-data_access_size("LDRB",DestReg,1):-
-    op_regdirect_contains_reg(_,DestReg).
-data_access_size("LDRSH",DestReg,2):-
-    op_regdirect_contains_reg(_,DestReg).
-data_access_size("LDRH",DestReg,2):-
-    op_regdirect_contains_reg(_,DestReg).
+data_access_size("LDRD",as(DestReg,register),8):-
+    op_regdirect(_,DestReg).
+data_access_size("LDR",as(DestReg,register),4):-
+    op_regdirect(_,DestReg).
+data_access_size("LDRSB",as(DestReg,register),1):-
+    op_regdirect(_,DestReg).
+data_access_size("LDRB",as(DestReg,register),1):-
+    op_regdirect(_,DestReg).
+data_access_size("LDRSH",as(DestReg,register),2):-
+    op_regdirect(_,DestReg).
+data_access_size("LDRH",as(DestReg,register),2):-
+    op_regdirect(_,DestReg).
 
 data_access_size(Operation,DestReg,Size):-
     load_operation(Operation),
@@ -178,6 +180,12 @@ pc_relative_addr(EA,Reg,Val):-
     pc_relative_disp(EA,Disp),
     Val = as(as(EA - (EA band 3),number) + Sign * Offset + Disp,address).
 
+.override instruction_at
+
+instruction_at(EA,Instruction):-
+    instruction(Instruction,_,_,_,_,_,_,_,_,_),
+    EA = Instruction - (Instruction band 1).
+
 /**
 E.g.,
 0: movs r0, #0
@@ -186,7 +194,6 @@ The upper 2-bytes of the mov instruction happens to be a valid Thumb
 instruction: ITETE in this case.
 */
 .decl dangling_thumb_instr(EA:address)
-.output dangling_thumb_instr
 
 dangling_thumb_instr(EA):-
     instruction(EA,2,_,_,_,_,_,_,_,_),
@@ -208,7 +215,6 @@ The condition switch in the IT block can be either: T (Then) or E (Else).
 This predicate determines if EA is a IT block instruction.
 */
 .decl it_conditional(EA:address,IT:address)
-.output it_conditional
 
 it_conditional(EA,IT):-
     !dangling_thumb_instr(IT),
@@ -357,7 +363,11 @@ call_operation("BLXAL").
 syscall_operation("SWI").
 syscall_operation("SVC").
 
+halt_operation("HLT").
 halt_operation("UDF").
+
+// capstone decodes Thumb "udf 0xfe" (bytes: "fe de") as "TRAP".
+halt_operation("TRAP").
 
 // TODO:
 return_operation(""):-
@@ -481,9 +491,6 @@ reg_reg_arithmetic_operation(EA,Dst,Src1,Src2,Sign,0):-
     op_regdirect_contains_reg(Op1,Src1),
     op_regdirect_contains_reg(Op2,Src2),
     op_regdirect_contains_reg(Op3,Dst).
-
-inferred_main_in_reg(EA,"R0"):-
-    inferred_main_dispatch(EA).
 
 /**
 The function `Func` receives a string argument at register `Reg`.

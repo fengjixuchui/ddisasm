@@ -1,5 +1,21 @@
-# 1.5.5 (Unreleased)
+# 1.6.0 (Unreleased)
+* ARM: Improve code inference using unwind information from .ARM.exidx section
+* Replace symbolic expression attributes with composable labels.
+
+# 1.5.6
+* Discover ARM Thumb blocks at section start in stripped binaries.
+* Bugfix for undefined TLS symbol relocations.
+* Add ARM `HLT` and `TRAP` instruction support.
+* Bugfix for aliased copy-relocations.
+* Bugfix to avoid propagating synchronous accesses across symbols.
+* Add build option for compiled Souffle profile generation.
+* Improved x86-64 dynamic TLS support.
+* Various logic improvements for GLIBC rewriting support.
+
+# 1.5.5
 * Update generated `elfSymbolVersions` auxdata.
+* Add "--ignore-errors" argument.
+* Update LIEF to version 0.12.3.
 
 # 1.5.4
 * Add PE32 Safe Structured Exception Handling (SAFESEH) support.

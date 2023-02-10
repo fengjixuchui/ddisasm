@@ -87,6 +87,11 @@ Define a standard interface for architecture components.
 */
 .comp Arch {
 
+/**
+The name of the active architecture
+*/
+.decl arch(Name:symbol) inline
+
 // ===========================================================================
 // Operation Types
 // ===========================================================================
@@ -108,7 +113,6 @@ defintive list of jumps.
 Define all variants of the move operation.
 */
 .decl move_operation(Operation:symbol)
-.output move_operation
 
 .decl load_operation(Operation:symbol)
 
@@ -117,12 +121,10 @@ load_word_operation(""):-
     false.
 
 .decl store_operation(Operation:symbol)
-.output store_operation
 
 .decl conditional_operation(Operation:symbol,CC:condition_code)
 
 .decl conditional(EA:address,CC:condition_code)
-.output conditional
 
 conditional(EA,CC):-
     instruction_get_operation(EA,Operation),
@@ -144,23 +146,19 @@ This can include any kinds of arithmetic operations including arithmetic shifts
 and multiplications.
 */
 .decl arithmetic_operation(Operation:symbol)
-.output arithmetic_operation
 
 /**
 This can include logical operations including bitwise operations.
 */
 .decl logic_operation(Operation:symbol)
-.output logic_operation
 
 .decl call_operation(Operation:symbol)
-.output call_operation
 
 .decl syscall_operation(Operation:symbol)
 
 .decl return_operation(Operation:symbol)
 
 .decl halt_operation(Operation:symbol)
-.output halt_operation
 
 halt_operation(""):-
     false.
@@ -174,7 +172,6 @@ May include operations that:
 
 */
 .decl cmp_operation(Operation:symbol)
-.output cmp_operation
 
 /**
 Comparison operations where a value is implicitly compared to zero.
@@ -183,7 +180,6 @@ Comparison may occur within an instruction that is also a branch operation,
 e.g., "BEQZ" on MIPS.
 */
 .decl cmp_zero_operation(Operation:symbol)
-.output cmp_zero_operation
 
 cmp_zero_operation(""):-
     false.
@@ -245,13 +241,11 @@ is_nop(EA):-
 Returns
 */
 .decl return(EA:address) overridable
-.output return
 return(EA):-
     instruction_get_operation(EA,Operation),
     return_operation(Operation).
 
 .decl jump(EA:address) overridable
-.output jump
 
 jump(EA):-
     instruction_get_operation(EA,Operation),
@@ -278,7 +272,6 @@ AccesSize: The size of the entire consecutive memory that the given
 .decl memory_access_aggregated(AccessType:symbol,EA:address,
     BaseReg:reg_nullable,IndexReg:reg_nullable,Mult:number,Offset:number,
     AccessSize:unsigned)
-.output memory_access_aggregated
 
 memory_access_aggregated("",0,"","",0,0,0):- false.
 
@@ -304,7 +297,6 @@ DirectReg, BaseReg, and IndexReg may be untracked registers or unstandardized na
 */
 .decl memory_access(AccessType:symbol,EA:address,SrcOp:operand_index,DstOp:operand_index,
     DirectReg:register,BaseReg:reg_nullable,IndexReg:reg_nullable,Mult:number,Offset:number)
-.output memory_access
 
 /**
 Represents a load from memory to a register.
@@ -329,7 +321,6 @@ store(EA,SrcOp,DstOp,SrcReg,BaseReg,IndexReg,Mult,Offset):-
     memory_access("STORE",EA,SrcOp,DstOp,SrcReg,BaseReg,IndexReg,Mult,Offset).
 
 .decl delay_slot(BranchEA:address,EA:address)
-.output delay_slot
 
 delay_slot(0,0):-
     false.
@@ -350,7 +341,6 @@ data_access_size("","NONE",0):-
 Arithmetic operation on one source register of the form Dst = Src * Mult + Offset
 */
 .decl reg_arithmetic_operation(EA:address,Dst:register,Src:register,Mult:number,Offset:number)
-.output reg_arithmetic_operation
 
 // Simplify operations with two source registers where both registers are the same.
 reg_arithmetic_operation(EA,Dst,Src,Mult+1,Offset):-
@@ -363,7 +353,6 @@ Arithmetic operation on two source registers of the form Dst = Src1 + Src2 * Mul
 Note: Src1 and Src2 *may* be the same register.
 */
 .decl reg_reg_arithmetic_operation(EA:address,Dst:register,Src1:register,Src2:register,Mult:number,Offset:number)
-.output reg_reg_arithmetic_operation
 
 // Commutative property
 reg_reg_arithmetic_operation(EA,Dst,Reg2,Reg1,1,0):-
@@ -400,7 +389,6 @@ If the register is used for other operations in the instruction, it is assumed
 the sign extension occurs first.
 */
 .decl extend_reg(EA:address,Reg:register,Signed:unsigned,SrcBits:unsigned)
-.output extend_reg
 
 extend_reg(0,"",0,0):-
     false.
@@ -409,7 +397,6 @@ extend_reg(0,"",0,0):-
 A value loaded from memory is zero/sign-extended.
 */
 .decl extend_load(EA:address,Signed:unsigned,SrcBits:unsigned)
-.output extend_load
 
 extend_load(0,0,0):-
     false.
@@ -438,26 +425,6 @@ instruction_op_access (Enable = 0).
 op_access_override(0,0,"",0):-
     false.
 
-/**
-The location and register where the address of main is loaded.
- */
-.decl inferred_main_in_reg(EA:address,Reg:register)
-
-/**
- * Locate where main() is dispatched (i.e., where __libc_start_main is called.)
- */
-.decl inferred_main_dispatch(EA:address) overridable
-
-// Most runtimes dispatch main with the first "call" from the binary entry point.
-inferred_main_dispatch(CallEA):-
-    do_infer_main_function(),
-    CallEA = min EA:{
-        start_function(Entry),
-        arch.call(EA,_),
-        code_in_block(EA,_),
-        EA >= Entry
-    }.
-
 // ===========================================================================
 // Registers
 // ===========================================================================
@@ -479,7 +446,7 @@ according to the architecture's calling convention.
 /**
 The PC register, if architecturally accessible.
 */
-.decl pc_reg(Reg:register)
+.decl pc_reg(Reg:register) inline
 
 /**
 Register that may hold the stack frame pointer.
@@ -535,6 +502,21 @@ A pc-relative address 'Target' is loaded into 'Reg' at address 'EA'.
 .decl pc_relative_addr(EA:address,Reg:register,Target:address)
 
 pc_relative_addr(0,"",0):- false.
+
+/**
+Maps instruction identifier address to the instruction's real memory address.
+
+While this is a simple one-to-one mapping on most architectures, Thumb
+instructions on ARM are offset by 1 byte. This relation makes it easier to
+write portable rules.
+
+Maps all instructions in the instruction input relation, regardless of
+invalid(), etc.
+*/
+.decl instruction_at(EA:address,Instruction:address) overridable
+
+instruction_at(Instruction,Instruction):-
+    instruction(Instruction,_,_,_,_,_,_,_,_,_).
 
 /**
 The size of a register, in bits.

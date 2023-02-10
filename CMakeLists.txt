@@ -32,6 +32,7 @@ option(DDISASM_ARM_64 "Whether or not ARM64 support is built." ON)
 option(DDISASM_MIPS_32 "Whether or not MIPS support is built." ON)
 option(DDISASM_X86_32 "Whether or not x86_32 support is built." ON)
 option(DDISASM_X86_64 "Whether or not x86_64 support is built." ON)
+option(DDISASM_SOUFFLE_PROFILING "Whether to generate Souffle profiles." OFF)
 
 if(NOT DEFINED DDISASM_BUILD_REVISION)
   execute_process(
@@ -292,7 +293,7 @@ endif()
 if(ENABLE_CONAN)
   set(LIEF_LIBRARIES CONAN_PKG::lief)
 else()
-  find_package(LIEF 0.12.1 REQUIRED COMPONENTS STATIC)
+  find_package(LIEF 0.12.3 REQUIRED COMPONENTS STATIC)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -350,7 +351,8 @@ if(DDISASM_ENABLE_TESTS)
 
   add_test(
     NAME python_tests
-    COMMAND ${PYTHON} -m unittest discover tests "*_test.py"
+    COMMAND
+      ${PYTHON} -u -m unittest discover tests "*_test.py"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/")
 endif()
 

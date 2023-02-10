@@ -36,6 +36,9 @@
 
 #include <souffle/CompiledSouffle.h>
 #include <souffle/SouffleInterface.h>
+#if defined(DDISASM_SOUFFLE_PROFILING)
+#include <souffle/profile/ProfileEvent.h>
+#endif
 
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
@@ -126,6 +129,7 @@ int main(int argc, char **argv)
         "debug-dir", po::value<std::string>(), "location to write CSV files for debugging")(
         "hints", po::value<std::string>(), "location of user-provided hints file")(
         "input-file", po::value<std::string>(), "file to disasemble")(
+        "ignore-errors", "Return success even if there are disassembly errors.")(
         "keep-functions,K", po::value<std::vector<std::string>>()->multitoken(),
         "Print the given functions even if they are skipped by default (e.g. _start)")(
         "self-diagnose",
@@ -136,8 +140,7 @@ int main(int argc, char **argv)
         "with-souffle-relations", "Package facts/output relations into an AuxData table.")(
         "no-cfi-directives",
         "Do not produce cfi directives. Instead it produces symbolic expressions in .eh_frame.")(
-        "threads,j", po::value<unsigned int>()->default_value(1),
-        "Number of cores to use. It is set to the number of cores in the machine by default")(
+        "threads,j", po::value<unsigned int>()->default_value(1), "Number of cores to use.")(
         "generate-import-libs", "Generated .DEF and .LIB files for imported libraries (PE).")(
         "generate-resources", "Generated .RES files for embedded resources (PE).")(
         "no-analysis,n",
@@ -147,7 +150,7 @@ int main(int argc, char **argv)
         "library-dir,L", po::value<std::string>(),
         "Directory from which extra libraries are loaded when running the interpreter")(
         "profile", po::value<std::string>(),
-        "Generate Souffle profiling information the specified path (requires --interpreter)");
+        "Generate Souffle profiling information at the specified path");
 
     po::positional_options_description pd;
     pd.add("input-file", -1);
@@ -192,11 +195,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
+#if !defined(DDISASM_SOUFFLE_PROFILING)
     if(vm.count("profile") && !vm.count("interpreter"))
     {
         std::cerr << "Error: missing `--interpreter' argument required by `--profile'\n";
         return 1;
     }
+#endif
 
     // Parse and build a GTIRB module from a supported binary object file.
     std::cerr << "Building the initial gtirb representation " << std::flush;
@@ -237,6 +242,7 @@ int main(int argc, char **argv)
     }
 
     bool HasPE = false;
+    bool AnalysisErrors = false;
     auto Modules = GTIRB->IR->modules();
     unsigned int ModuleCount = std::distance(std::begin(Modules), std::end(Modules));
     for(auto &Module : Modules)
@@ -270,13 +276,6 @@ int main(int argc, char **argv)
 
         printElapsedTimeSince(StartDecode);
 
-        // Remove initial entry point.
-        if(gtirb::CodeBlock *Block = Module.getEntryPoint())
-        {
-            Block->getByteInterval()->removeBlock(Block);
-        }
-        Module.setEntryPoint(nullptr);
-
         Souffle->insert("option", createDisasmOptions(vm));
 
         fs::path DebugDir;
@@ -302,13 +301,14 @@ int main(int argc, char **argv)
         std::cerr << "Disassembling" << std::flush;
         unsigned int Threads = vm["threads"].as<unsigned int>();
 
+        const std::string &ProfilePath =
+            vm.count("profile") ? vm["profile"].as<std::string>() : std::string();
+
         auto StartDisassembling = std::chrono::high_resolution_clock::now();
         if(vm.count("interpreter"))
         {
             // Disassemble with the interpeter engine.
             std::cerr << " (interpreter)";
-            const std::string &ProfilePath =
-                vm.count("profile") ? vm["profile"].as<std::string>() : std::string();
             const std::string &DatalogFile = vm["interpreter"].as<std::string>();
             const std::string &LibDirectory =
                 vm.count("library-dir") ? vm["library-dir"].as<std::string>() : std::string();
@@ -318,7 +318,11 @@ int main(int argc, char **argv)
         else
         {
             // Disassemble with the compiled, synthesized program.
+#if defined(DDISASM_SOUFFLE_PROFILING)
+            souffle::ProfileEventSingleton::instance().setOutputFile(ProfilePath);
+#endif
             Souffle->threads(Threads);
+            Souffle->pruneImdtRels = !(vm.count("with-souffle-relations") || vm.count("debug-dir"));
             try
             {
                 Souffle->run();
@@ -378,7 +382,7 @@ int main(int argc, char **argv)
         Module.removeAuxData<gtirb::schema::Relocations>();
         Module.removeAuxData<gtirb::schema::SectionIndex>();
 
-        performSanityChecks(Souffle->get(), vm.count("self-diagnose") != 0);
+        AnalysisErrors |= performSanityChecks(Souffle->get(), vm.count("self-diagnose") != 0);
 
         if(Module.getFileFormat() == gtirb::FileFormat::PE)
         {
@@ -508,5 +512,10 @@ int main(int argc, char **argv)
         GTIRB->Context->ForgetAllocations();
     }
 
-    return 0;
+    if(AnalysisErrors && !vm.count("ignore-errors"))
+    {
+        return EXIT_FAILURE;
+    }
+
+    return EXIT_SUCCESS;
 }

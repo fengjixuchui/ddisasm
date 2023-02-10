@@ -35,6 +35,8 @@ void ElfSymbolLoader(const gtirb::Module &Module, DatalogProgram &Program);
 
 void ElfExceptionLoader(const gtirb::Module &Module, DatalogProgram &Program);
 
+void ElfArchInfoLoader(const gtirb::Module &Module, DatalogProgram &Program);
+
 class ElfExceptionDecoder
 {
 private:
@@ -64,5 +66,7 @@ public:
     ElfExceptionDecoder(const gtirb::Module &module);
     void addExceptionInformation(souffle::SouffleProgram *prog);
 };
+
+void ArmUnwindLoader(const gtirb::Module &Module, DatalogProgram &Program);
 
 #endif // SRC_GTIRB_DECODER_FORMAT_ELFLOADER_H_

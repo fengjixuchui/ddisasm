@@ -14,7 +14,7 @@ default: &default
   # Reassembly configuration.
   reassemble:
     compiler: "aarch64-linux-gnu-gcc"
-    flags: []
+    flags: ["-nostartfiles"]
     skip: false
 
   # Test configuration.
@@ -36,7 +36,7 @@ default-cpp: &default-cpp
   <<: *default
   reassemble:
     compiler: "aarch64-linux-gnu-g++"
-    flags: ["-no-pie"]
+    flags: ["-no-pie", "-nostartfiles"]
     skip: false
 
   test:
@@ -61,6 +61,9 @@ tests:
     <<: *default
 
   - name: ex_confusing_data
+    <<: *default
+
+  - name: ex_copy_relo
     <<: *default
 
   - name: ex_exceptions1
@@ -92,7 +95,7 @@ tests:
       optimizations: ["-O0"]
     reassemble:
       compiler: "aarch64-linux-gnu-g++"
-      flags: []
+      flags: ["-nostartfiles"]
       skip: false
     test:
       <<: *default-test
@@ -103,7 +106,7 @@ tests:
     <<: *default
     reassemble:
       compiler: "aarch64-linux-gnu-g++"
-      flags: []
+      flags: ["-nostartfiles"]
       skip: false
 
     test:
@@ -143,7 +146,7 @@ tests:
     <<: *default
     reassemble:
       compiler: "aarch64-linux-gnu-g++"
-      flags: []
+      flags: ["-nostartfiles"]
       skip: false
 
     test:

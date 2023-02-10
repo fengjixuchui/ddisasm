@@ -39,7 +39,7 @@ class Properties:
     name = "ddisasm"
     version = get_version()
     rel_url = "rewriting/ddisasm"
-    exports_sources = "*", "!.conan/*"
+    exports_sources = "*", "!.conan/*", "!ccache/*"
 
     @property
     def description(self):
@@ -74,7 +74,7 @@ class DdisasmConan(Properties, ConanFile):
     generators = "cmake"
     settings = ("os", "compiler", "build_type", "arch")
 
-    lief_version = "0.12.1"
+    lief_version = "0.12.3"
     libehp_version = "0.1.1-gt3"
     souffle_version = "2.3"
     build_requires = (
@@ -158,7 +158,7 @@ class DdisasmConan(Properties, ConanFile):
             ] = "/DBOOST_ALL_NO_LIB /DBOOST_UUID_FORCE_AUTO_LINK"
             self.add_dep_lib_path("libffi")
         else:
-            cmake = CMake(self, generator=None, parallel=True)
+            cmake = CMake(self, generator=None, parallel=False)
             defs.update({"GTIRB_PPRINTER_STRIP_DEBUG_SYMBOLS:BOOL": "ON"})
 
         revision = os.environ.get("CI_COMMIT_SHORT_SHA")

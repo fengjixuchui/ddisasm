@@ -215,6 +215,45 @@ invalid(EA, "arm: invalid stm/ldm"):-
     ).
 
 /**
+Assign ARM version names to their generation number
+
+e.g., "v7E_M" -> 7
+*/
+.decl arm_ver_order(Name:symbol,VersionID:unsigned)
+
+arm_ver_order("Pre_v4", 3).
+arm_ver_order("v4", 4).
+arm_ver_order("v4T", 4).
+arm_ver_order("v5T", 5).
+arm_ver_order("v5TE", 5).
+arm_ver_order("v5TEJ", 5).
+arm_ver_order("v6", 6).
+arm_ver_order("v6KZ", 6).
+arm_ver_order("v6_M", 6).
+arm_ver_order("v6S_M", 6).
+arm_ver_order("v7", 7).
+arm_ver_order("v7E_M", 7).
+arm_ver_order("v8_A", 8).
+arm_ver_order("v8_R", 8).
+arm_ver_order("v8_M_Base", 8).
+arm_ver_order("v8_M_Main", 8).
+arm_ver_order("v8_1_M_Main", 8).
+arm_ver_order("v9", 9).
+
+invalid(EA,"hlt: min v8"):-
+    arch_info("Arch",Version),
+    arm_ver_order(Version,VerID),
+    VerID < 8,
+    instruction_get_operation(EA,"HLT").
+
+invalid(EA,"writeback to PC"):-
+    instruction_writeback(EA),
+    instruction_get_op(EA,_,Op),
+    op_indirect(Op,_,PCIn,_,_,_,_),
+    reg_map(PCIn,PC),
+    arch.pc_reg(PC).
+
+/**
 Compute the value loaded from a literal pool.
   - ldr Reg, [BaseReg, Off]
   - ldrd Reg1, Reg2, [BaseReg, Off]
@@ -264,7 +303,6 @@ This predicate is used for excluding such case from `litpool_ref`.
 Also, the target should not be aligned.
 */
 .decl pc_relative_for_jump_table(EA:address)
-.output pc_relative_for_jump_table
 
 pc_relative_for_jump_table(EA_adr):-
     op_shifted(EA_add,3,4,"LSL"),
@@ -325,6 +363,17 @@ basic_target(Val):-
     !thumb_sym(Name),
     !data_sym(Name).
 
+// Mapping symbols yield known blocks.
+known_block(Block,"code","$a"):-
+    arm_sym(Name),
+    defined_symbol(Block,_,_,_,_,_,_,_,Name),
+    block_candidate_boundaries(Block,"code",_,_).
+
+known_block(Block bor 1,"code","$t"):-
+    thumb_sym(Name),
+    defined_symbol(Block,_,_,_,_,_,_,_,Name),
+    block_candidate_boundaries(Block,"code",_,_).
+
 /**
 Either movw r, #N or movt r, #N
 */
@@ -342,7 +391,6 @@ E.g., EA_movw: movw reg, N
    => reg's Value = N | (M << 16)
 */
 .decl movw_movt_pair(EA_movw:address,EA_movt:address,Value:number)
-.output movw_movt_pair
 
 movw_movt_pair(EA_movw,EA_movt,Value):-
     instruction_get_operation(EA_movw,"MOVW"),
@@ -396,6 +444,7 @@ plt_entry(EA,Function):-
     plt_entry_arm_candidate(_,EA,Function,_).
 
 block_points(EA_entry,"code",0,7,"arm: plt-block"):-
+    unresolved_block(EA_entry,"code"),
     plt_entry_arm_candidate(EA_entry,_,_,_).
 
 /**
@@ -422,7 +471,6 @@ Function: The external function that the PLT entry forwards
 EA_reloc: The destination address of the PLT entry
 */
 .decl plt_entry_arm_candidate(EA_entry:address, EA_jump:address, Function:symbol, EA_reloc:address)
-.output plt_entry_arm_candidate
 
 /**
 E.g.,
@@ -494,9 +542,9 @@ plt_entry_arm_candidate(EA,EA_jump,Function,as(Dest,address)):-
     Dest = as(EA_add,number) - 1 + Value,
     relocation(as(Dest,address),_,Function,_,_,_,_).
 
-block_points(Block,"code",0,10,"arm: THM_CALL relocation"):-
+// TODO: are there more relocation types that we can use as known blocks?
+known_block(Block,"code","arm: THM_CALL relocation"):-
     binary_type("REL"),
-    block_is_overlapping(Block,"code"),
     code_in_block_candidate_refined(EA,Block),
     arch.call(EA,_),
     AlignedEA = EA - (EA band 1),
@@ -506,42 +554,13 @@ block_points(Block,"code",0,1,"arm: plt call"):-
     plt_entry_arm_candidate(BlockDest,_,_,_),
     direct_call(EA,BlockDest),
     code_in_block_candidate_refined(EA,Block),
-    block_is_overlapping(Block,"code").
-
-/**
-E.g., vim
-0:   pop { r2, lr }
-4:   adr r1, L
-There is an overlapping block at 0x2 that happens to be a valid 2-byte Thumb
-instruction 'ldr'.
-
-If there is no block before the address 0x0, the following rule does not hold
-for both the block at 0x0 and the one at 0x2:
-
-  // Prefer blocks that have a well-defined boundary with a prior block.
-  block_points(Block,"code",0,1,"better fit")
-
-To break such tie, give one point to the outer block.
-
-Block: the outer block
-Block2: the enclosed block
-*/
-block_points(Block,"code",0,1,"arm: enclosing thumb instruction"):-
-    block_overlap(Block,"code",Block2,"code"),
-    (Block band 1) = 1, // Thumb mode only
-    Block2 = Block + 2,
-    instruction(Block,4,_,_,_,_,_,_,_,_),
-    instruction(Block2,2,_,_,_,_,_,_,_,_),
-    block_candidate_boundaries(Block,"code",Beg,_),
-    block_candidate_boundaries(Block2,"code",Beg2,_),
-    !block_candidate_boundaries(_,"code",_,Beg),
-    !block_candidate_boundaries(_,"code",_,Beg2).
+    unresolved_block(Block,"code").
 
 /**
 Prefer blocks that have a well-defined boundary with a prior literal pool.
 */
 block_points(Block,"code",0,1,"arm: better fit after literal pool"):-
-    block_is_overlapping(Block,"code"),
+    unresolved_block(Block,"code"),
     block_candidate_boundaries(Block,"code",Beg,_),
     (
         !block_candidate_boundaries(_,"code",_,Beg)
@@ -549,15 +568,15 @@ block_points(Block,"code",0,1,"arm: better fit after literal pool"):-
         block_candidate_boundaries(BlockPred,"code",_,Beg),
         (Block band 1) != (BlockPred band 1)
     ),
-    litpool_boundaries(LitPoolAddr,Beg).
+    litpool_boundaries(_,Beg).
 
 /**
 Similarly to the above rule, if the enclosed Thumb instruction does not have
 any predecessor and the outer instruction has one, give penalty to the dangling
 Thumb block.
 */
-block_points(Block,"code",0,-1,"arm: dangling thumb instruction"):-
-    block_is_overlapping(Block,"code"),
+negative_block_points(Block,"code",0,-1,"arm: dangling thumb instruction"):-
+    unresolved_block(Block,"code"),
     (Block band 1) = 1, // Thumb mode only
     arch.dangling_thumb_instr(Block).
 
@@ -565,8 +584,8 @@ block_points(Block,"code",0,-1,"arm: dangling thumb instruction"):-
 It was observed that a valid ARM mode block often overlaps with a bad, small
 Thumb block consisting of ADDS/SUBS/ASRS and B instrutions.
 */
-block_points(Block,"code",0,-1,"arm: possibly invalid thumb block"):-
-    block_is_overlapping(Block,"code"),
+negative_block_points(Block,"code",0,-1,"arm: possibly invalid thumb block"):-
+    unresolved_block(Block,"code"),
     (Block band 1) = 1, // Thumb mode only
     instruction(Block,2,_,Operation,_,_,_,_,_,_),
     (Operation = "ADDS"; Operation = "SUBS"; Operation = "ASRS"),
@@ -601,7 +620,6 @@ OpIndex: The index of operand for literal-pool label.
         E.g., 1 for LDR, 2 for LDRD, 1 for ADR
 */
 .decl litpool_ref(EA:address, EA_ldr:address, RefAddr:address, Offset:unsigned, Size:unsigned, OpIndex:operand_index)
-.output litpool_ref
 
 /**
 (A) LDR or LDRD
@@ -629,7 +647,7 @@ litpool_ref(EA,EA_ldr,RefAddr,as(Offset,unsigned),Size,OpIndex):-
     arch.pc_relative_addr(EA,BaseReg,RefAddr),
     instruction_immediate_offset(EA,OpIndex,_,_),
     straight_line_def_used(EA,BaseReg,EA_ldr,_),
-    arch.load(EA_ldr,_,_,Reg1,BaseReg,_,_,Offset),
+    arch.load(EA_ldr,_,_,Reg1,BaseReg,"NONE",_,Offset),
     Offset >= 0,
     !arch.memory_access("LOAD",EA_ldr,_,_,_,_,_,_,Offset-4),
     instruction_memory_access_size(EA_ldr,_,Size),
@@ -712,15 +730,10 @@ Check if the given block overlaps with a possible literal pool.
 .decl overlap_with_litpool(Block:address)
 
 overlap_with_litpool(Block):-
-    (
-        block_overlap(Block,"code",Block2,"data")
-        ;
-        block_overlap(Block2,"data",Block,"code")
-    ),
+    block_overlap(Block,"code",Block2,"data"),
     litpool_ref(EA,_,Block2,_,_,_),
     code_in_block_candidate_refined(EA,Block3),
-    !block_overlap(Block3,"code",_,"data"),
-    !block_overlap(_,"data",Block3,"code").
+    !block_overlap(Block3,"code",_,"data").
 
 /**
 Confidence level for each literal pool
@@ -768,11 +781,11 @@ code_to_litpool_ref_point_transfer("may-fallthrough",0).
 code_to_litpool_ref_point_transfer("must-fallthrough",0).
 
 block_points(LitPoolAddr,"data",0,Points,cat("litpool: ",Reason)):-
-    block_points(Block,"code",0,Points0,Reason),
-    code_to_litpool_ref_point_transfer(Reason,Adjust),
     litpool_ref(EA,_,RefAddr,LitPoolOffset,_,_),
-    LitPoolAddr = RefAddr + LitPoolOffset,
     code_in_block_candidate_refined(EA,Block),
+    block_points(Block,"code",0,Points0,Reason),
+    LitPoolAddr = RefAddr + LitPoolOffset,
+    code_to_litpool_ref_point_transfer(Reason,Adjust),
     Points = Points0 + Adjust,
     Points > 0.
 
@@ -791,8 +804,12 @@ litpool_confidence(EA,LitPoolAddr,Confidence,"adr/ldm"):-
     contains("LDM",Operation),
     code_in_block_candidate(EA,Block),
     (
-        block_is_overlapping(Block,_), Confidence = 3;
-        !block_is_overlapping(Block,_), Confidence = 5
+        unresolved_block(Block,"code"),
+        Confidence = 3
+        ;
+        !unresolved_block(Block,"code"),
+        !impossible_block(Block,"code",_),
+        Confidence = 5
     ).
 
 /**
@@ -808,8 +825,12 @@ litpool_confidence(EA,LitPoolAddr,Confidence,"ldr/ldrd"):-
     !arch.dangling_thumb_instr(EA),
     code_in_block_candidate(EA,Block),
     (
-        block_is_overlapping(Block,_), Confidence = 3;
-        !block_is_overlapping(Block,_), Confidence = 5
+        unresolved_block(Block,"code"),
+        Confidence = 3
+        ;
+        !unresolved_block(Block,"code"),
+        !impossible_block(Block,"code",_),
+        Confidence = 5
     ).
 
 data_block_candidate(LitPoolAddr,Pt_size*2):-
@@ -827,7 +848,8 @@ litpool_confidence(EA,LitPoolAddr,Confidence,"ref by non-overlapping block"):-
     litpool_ref(EA,_,RefAddr,LitPoolOffset,_,_),
     LitPoolAddr = RefAddr + LitPoolOffset,
     code_in_block_candidate_refined(EA,Block),
-    !block_is_overlapping(Block,"code"),
+    !unresolved_block(Block,"code"),
+    !impossible_block(Block,"code",_),
     Confidence = 12.
 
 /**
@@ -839,10 +861,11 @@ block_points(Block,"code",0,Confidence,"litpool ref block: not overlapping"):-
     litpool_ref(EA,_,RefAddr,LitPoolOffset,_,_),
     LitPoolAddr = RefAddr + LitPoolOffset,
     code_in_block_candidate_refined(EA,Block),
-    block_is_overlapping(Block,"code"),
+    unresolved_block(Block,"code"),
     !overlap_with_litpool(Block),
     !code_in_block_candidate(LitPoolAddr+(EA band 1),_),
-    !block_is_overlapping(LitPoolAddr,_),
+    !unresolved_block(LitPoolAddr,"data"),
+    !impossible_block(LitPoolAddr,"data",_),
     Confidence = 1.
 
 /**
@@ -854,7 +877,7 @@ litpool_confidence(EA,LitPoolAddr,Confidence,"loaded register used somewhere"):-
     litpool_ref(EA,EA_ldr,RefAddr,LitPoolOffset,_,_),
     LitPoolAddr = RefAddr + LitPoolOffset,
     code_in_block_candidate_refined(EA,Block),
-    block_is_overlapping(Block,"code"),
+    unresolved_block(Block,"code"),
     !overlap_with_litpool(Block),
     arch.load(EA_ldr,_,_,Reg,_,_,_,_),
     straight_line_def_used(EA_ldr,Reg,_,_),
@@ -871,7 +894,7 @@ litpool_confidence(EA,LitPoolAddr,Confidence,"possibly register param"):-
     litpool_ref(EA,EA_ldr,RefAddr,LitPoolOffset,_,_),
     LitPoolAddr = RefAddr + LitPoolOffset,
     code_in_block_candidate_refined(EA,Block),
-    block_is_overlapping(Block,"code"),
+    unresolved_block(Block,"code"),
     !overlap_with_litpool(Block),
     !straight_line_def_used(EA,_,_,_),
     code_in_block_candidate(CallEA,Block),
@@ -908,7 +931,7 @@ litpool_confidence(EA,LitPoolAddr,Confidence,"valid VLDR"):-
     litpool_ref(EA,EA_ldr,RefAddr,LitPoolOffset,Size,_),
     LitPoolAddr = RefAddr + LitPoolOffset,
     code_in_block_candidate_refined(EA,Block),
-    block_is_overlapping(Block,"code"),
+    unresolved_block(Block,"code"),
     !straight_line_def_used(EA_ldr,_,_,_),
     instruction_get_operation(EA_ldr,"VLDR"),
     instruction_get_dest_op(EA_ldr,_,DestRegOp),
@@ -927,7 +950,7 @@ block_points(LitPoolAddr,"data",0,Confidence,"arm: litpool: ref by block contain
     litpool_ref(EA,_,RefAddr,LitPoolOffset,_,_),
     LitPoolAddr = RefAddr + LitPoolOffset,
     code_in_block_candidate_refined(EA,Block),
-    block_is_overlapping(Block,"code"),
+    unresolved_block(Block,"code"),
     !overlap_with_litpool(Block),
     Confidence = sum X:{plausible_block(Block,X,_,_)},
     Confidence > 0.
@@ -941,7 +964,7 @@ block_points(LitPoolAddr,"data",0,Points,"arm: litpool: consecutive literal pool
     litpool_ref(EA,_,RefAddr,LitPoolOffset,Size,_),
     LitPoolAddr = RefAddr + LitPoolOffset,
     code_in_block_candidate_refined(EA,Block),
-    block_is_overlapping(Block,"code"),
+    unresolved_block(Block,"code"),
     !overlap_with_litpool(Block),
     (Size2 = 4; Size2 = 8),
     (
@@ -969,21 +992,27 @@ block_points(LitPoolAddr,"data",0,Points,"arm: litpool: consecutive literal pool
         Points = 1
     ).
 
-block_points(Block,"data",0,10,"arm: $d symbol"),
-data_block_candidate(Block,Size):-
-    defined_symbol(Block,Size,_,_,_,_,_,_,"$d").
+block_points(Block,"data",0,10,"arm: $d symbol"):-
+    defined_symbol(Block,0,_,_,_,_,_,_,"$d"),
+    data_block_candidate(Block,_).
+
+impossible_block(Block,"code","Overlaps $d symbol"):-
+    defined_symbol(EA,0,_,_,_,_,_,_,"$d"),
+    block_candidate_boundaries(Block,"code",Start,End),
+    Start <= EA,
+    EA < End.
 
 /**
 If litpool overlaps with a function symbol or $t or $a, give penalty.
 */
-block_points(LitPoolAddr,"data",0,-20,"arm: litpool: overlapped with code symbol"):-
+negative_block_points(LitPoolAddr,"data",0,-20,"arm: litpool: overlapped with code symbol"):-
     litpool_boundaries(LitPoolAddr,_),
     symbol(LitPoolAddr,_,_,_,_,_,_,_,Name),
     (thumb_sym(Name); arm_sym(Name)).
 
 block_points(Block,"data",0,8,"possible string: symbol"),
 data_block_candidate(Block,End-Block):-
-    !arm_jump_table_candidate(_,Block,_,_,_,_,_,_,_),
+    !arm_jump_table_candidate(_,_,Block,_,_,_,_,_,_),
     ascii_string(Block,End),
     symbol(Block,_,Type,_,_,_,_,_,Name),
     Type != "FUNC",
@@ -1001,7 +1030,7 @@ Check if there's another string before or after this one.
 */
 block_points(Block,"data",0,5,"possible string: string pred exists"),
 data_block_candidate(Block,End-Block):-
-    !arm_jump_table_candidate(_,Block,_,_,_,_,_,_,_),
+    !arm_jump_table_candidate(_,_,Block,_,_,_,_,_,_),
     ascii_string(Block,End),
     aligned_address_in_data(_,Block),
     ascii_string(_,End2),
@@ -1021,7 +1050,7 @@ data_block_candidate(Block,End-Block):-
 
 block_points(Block,"data",0,5,"possible string: string succ exists"),
 data_block_candidate(Block,End-Block):-
-    !arm_jump_table_candidate(_,Block,_,_,_,_,_,_,_),
+    !arm_jump_table_candidate(_,_,Block,_,_,_,_,_,_),
     ascii_string(Block,End),
     aligned_address_in_data(_,Block),
     ascii_string(Block2,_),
@@ -1050,11 +1079,11 @@ Block: .string "..."
 */
 block_points(Block,"data",0,4,"possible string: string param for string library"),
 data_block_candidate(Block,End-Block):-
-    !arm_jump_table_candidate(_,Block,_,_,_,_,_,_,_),
-    ascii_string(Block,End),
-    address_in_data(LitPoolAddr,Block),
     litpool_ref(EA,EA_ldr,RefAddr,LitPoolOffset,_,_),
     LitPoolAddr = RefAddr + LitPoolOffset,
+    address_in_data(LitPoolAddr,Block),
+    ascii_string(Block,End),
+    !arm_jump_table_candidate(_,_,Block,_,_,_,_,_,_),
     arch.load(EA_ldr,_,_,Reg,_,_,_,_),
     code_in_block_candidate(EA,Block2),
     code_in_block_candidate(CallEA,Block2),
@@ -1079,8 +1108,8 @@ To give more confidence to the real block with strb,
 give points 2 to the enclosing block when the enclosing block has
 a must-fallthrough even if the block is overlapping.
 */
-block_points(InnerBlock,"code",0,-3,"arm: bogus sub-instruction"):-
-    block_is_overlapping(InnerBlock,"code"),
+negative_block_points(InnerBlock,"code",0,-3,"arm: bogus sub-instruction"):-
+    unresolved_block(InnerBlock,"code"),
     code_in_block_candidate_refined(EnclosingEA,_),
     must_fallthrough(_,EnclosingEA),
     EnclosingEA = InnerBlock-2,
@@ -1092,7 +1121,7 @@ block_points(InnerBlock,"code",0,-3,"arm: bogus sub-instruction"):-
 A return block followed by a function symbol is likely real code.
 */
 block_points(Block,"code",0,2,"arm: return followed by a function"):-
-    block_is_overlapping(Block,"code"),
+    unresolved_block(Block,"code"),
     code_in_block_candidate_refined(EA,Block),
     arch.return(EA),
     next(EA,EANext),
@@ -1108,8 +1137,7 @@ E.g.,
 >  ldmdaeq r7, { r0, r3, r6, r7, r8, sb, fp, ip }
 >  ldmdaeq r5, { r1, r3, r4, r5, r7, r8 }
 */
-block_is_overlapping(Block,"code"),
-block_points(Block,"code",0,-7,"arm: ldmdaeq"):-
+negative_block_points(Block,"code",0,-7,"arm: ldmdaeq"):-
     code_in_block_candidate_refined(EA,Block),
     instruction_get_operation(EA,Operation),
     contains("LDM",Operation),
@@ -1127,7 +1155,7 @@ block_points(Block,"code",0,-7,"arm: ldmdaeq"):-
 /**
 0x00000000 is unlikely a real instruction.
 */
-block_points(Block,"code",0,-2,"arm: contains unplausible instr"):-
+negative_block_points(Block,"code",0,-2,"arm: contains unplausible instr"):-
     code_in_block_candidate_refined(EA,Block),
     (EA band 1) = 0,
     data_word(EA,4,0).
@@ -1136,13 +1164,9 @@ block_points(Block,"code",0,-2,"arm: contains unplausible instr"):-
 A code block that must fall through to a function symbol, and overlaps with a
 literal pool is highly likely false.
 */
-block_points(Block,"code",0,-9,"arm: possibly a litpool followed by a function symbol"):-
+negative_block_points(Block,"code",0,-9,"arm: possibly a litpool followed by a function symbol"):-
     code_in_block_candidate_refined(EA,Block),
-    (
-        block_overlap(Block,"code",BlockLitPool,"data")
-        ;
-        block_overlap(BlockLitPool,"data",Block,"code")
-    ),
+    unresolved_block_overlap(Block,"code",BlockLitPool,"data"),
     litpool_boundaries(BlockLitPool,_),
     must_fallthrough(EA,BlockSucc),
     Block != BlockSucc,
@@ -1153,17 +1177,20 @@ This is similar to the one above, but weaker.
 In some cases, the data bytes prior to a function symbol may not be explicitly
 referenced as a literal pool.
 */
-block_points(Block,"code",0,-1,"arm: must-fallthrough to a function symbol is not likely code"):-
+negative_block_points(Block,"code",0,-1,"arm: must-fallthrough to a function symbol is not likely code"):-
     code_in_block_candidate_refined(EA,Block),
     must_fallthrough(EA,BlockSucc),
     Block != BlockSucc,
     function_symbol(BlockSucc,_).
 
-data_block_candidate(Block,Pt_size),
+data_block_candidate(Block,Pt_size):-
+    aligned_address_in_data(Block,Addr),
+    ascii_string(Addr,_),
+    arch.pointer_size(Pt_size).
+
 block_points(Block,"data",0,2,"arm: pointer to string in data"):-
     aligned_address_in_data(Block,Addr),
     ascii_string(Addr,_),
-    arch.pointer_size(Pt_size),
     // The string does not overlap with a possible literal pool.
     align_addr(Addr_aligned,Addr),
     !litpool_boundaries(Addr_aligned,_).
@@ -1183,8 +1210,10 @@ block_points(Block,"data",0,3,"arm: pointer to string adjacent to another string
         ascii_string(End,_)
     ).
 
+// First data_block of the jump table gets lots of points,
+// since the tbh instruction must have some corresponding entries.
 block_points(TableStart,"data",0,Points,"arm: jump table"):-
-    arm_jump_table_candidate(_,TableStart,_,_,_,_,_,_,_),
+    arm_jump_table_candidate(_,_,TableStart,_,_,_,_,_,_),
     data_block_candidate(TableStart,_),
     (
         !defined_symbol(TableStart,_,_,_,_,_,_,_,"$d"), Points = 15
@@ -1193,59 +1222,129 @@ block_points(TableStart,"data",0,Points,"arm: jump table"):-
         defined_symbol(TableStart,_,_,_,_,_,_,_,"$d"), Points = 5
     ).
 
+// Subsequent data blocks compete with code blocks.
+// Give a few points to encourage selection unless there's a compelling reason
+// to select the code.
+block_points(Block,"data",0,2,"arm: jump table"):-
+    arm_jump_table_data_block(_,TableStart,Block,_),
+    unresolved_block(Block,"data"),
+    Block != TableStart.
+
+// Give points to a jump table entry block if its end corresponds with the
+// first target code block of the jump table.
+block_points(Block,"data",0,10,"arm: jump table fits target"):-
+    arm_jump_table_data_block(EA_jump,TableStart,Block,BlockSize),
+    unresolved_block(Block,"data"),
+    arm_jump_table_candidate(EA_jump,_,TableStart,Block,Size,_,_,_,_),
+    FirstTargetAddr = min TargetAddr : {
+        arm_jump_table_candidate(EA_jump,_,TableStart,EA,_,TargetAddr,_,_,_),
+        // Only consider targets that would exist if Block were the last block
+        // of entries.
+        EA < Block + BlockSize,
+        // Only find Targets *after* the jump table (can be before in signed or
+        // absolute jump tables)
+        TargetAddr > TableStart
+    },
+    AlignedFirstTargetAddr = FirstTargetAddr - (FirstTargetAddr band 1),
+    (
+        // Perfect alignment.
+        Block + BlockSize = AlignedFirstTargetAddr,
+        UNUSED(Size)
+        ;
+        // Aligns, but there's an extra byte at the end of a tbb jumptable,
+        // because there were an odd number of real targets.
+        // Compilers may insert a zero byte to fill it.
+        Size = 1,
+        (Block + BlockSize) band 1 = 1,
+        Block + BlockSize + 1 = AlignedFirstTargetAddr,
+        data_byte(Block + BlockSize,0)
+    ),
+    // Don't apply this rule to first block of entries - it already gets 15 points.
+    Block != TableStart.
+
 block_points(TargetEA,"code",0,3,"arm: jump table target"):-
-    arm_jump_table_candidate(_,_,_,_,TargetEA,_,_,_,_),
-    block_is_overlapping(TargetEA,"code").
+    arm_jump_table_data_block(EA_jmp,TableStart,Block,BlockSize),
+    arm_jump_table_candidate(EA_jmp,_,TableStart,DataEA,Size,TargetEA,_,_,_),
+    Block <= DataEA, DataEA+Size <= Block+BlockSize,
+    unresolved_block(TargetEA,"code").
 
 must_access_data(EA,Dest):-
     litpool_ref(_,EA,Dest,_,_,_).
 
 /**
-Decode Thumb-2 encoded branch offset. Used to find REL relocation addends.
-
-Note that this is backwards compatible with Thumb-1.
+ArchInfo auxdata inferred by the presence of specific instructions or patterns.
 */
-.decl thumb_branch_offset(EA:address,Offset:number)
-.output thumb_branch_offset
+.decl inferred_arch_info(Key:symbol,Value:symbol)
+.output inferred_arch_info
 
-thumb_branch_offset(EA,Offset):-
-    (
-        relocation(EA,"THM_CALL",_,_,_,_,_);
-        relocation(EA,"THM_JUMP24",_,_,_,_,_)
-    ),
-    data_word(EA,2,Half0),
-    data_word(EA+2,2,Half1),
-    UpperHalf = as(Half0,unsigned),
-    LowerHalf = as(Half1,unsigned),
-    Sign = (UpperHalf band (1 bshl 10)) bshr 10,
-    Upper = UpperHalf band 0x3FF,
-    Lower = LowerHalf band 0x7FF,
-    J1 = (LowerHalf band (1 bshl 13)) bshr 13,
-    J2 = (LowerHalf band (1 bshl 11)) bshr 11,
-    (J1 bxor Sign = 0, I1 = 1; J1 bxor Sign != 0, I1 = 0),
-    (J2 bxor Sign = 0, I2 = 1; J2 bxor Sign != 0, I2 = 0),
-    Bits = (Sign bshl 24) bor (I1 bshl 23) bor (I2 bshl 22) bor (Upper bshl 12) bor (Lower bshl 1),
-    // Sign-extend unsigned 25-bit value to 32 bits.
-    Masked = Bits band ((bnot 1) bshr (32 - 25)),
-    TopBit = as(1 bshl (25 - 1),number),
-    Signed = as(Masked,number),
-    (
-        Signed band TopBit = 0,  Offset = Signed;
-        Signed band TopBit != 0, Offset = Signed - (TopBit * 2)
-    ).
+// "System" is not a true hardware profile, but represents
+// Application OR RealTime profiles.
 
-/**
-Block containing instructions that only belong to Microcontroller arch.
-*/
-.decl arm_microcontroller(Block:address)
-.output arm_microcontroller
+// "blx label" is not possible on the "Microcontroller" profile.
+inferred_arch_info("Profile","System"):-
+    !arch_info("Profile",_),
+    code_in_refined_block(EA,_),
+    instruction_get_operation(EA,Operation),
+    substr(Operation,0,3) = "BLX",
+    arch.jump_operation_op_index(Operation,OpIndex),
+    instruction_get_op(EA,OpIndex,Op),
+    op_immediate(Op,_).
 
-arm_microcontroller(Block):-
-    refined_block(Block),
-    code_in_block_candidate_refined(EA,Block),
+// ARM code is not possible on the "Microcontroller" profile.
+inferred_arch_info("Profile","System"):-
+    !arch_info("Profile",_),
+    code_in_refined_block(EA,_),
+    EA band 1 = 0.
+
+inferred_arch_info("Profile","Microcontroller"):-
+    !arch_info("Profile",_),
+    code_in_refined_block(EA,_),
     instruction_get_operation(EA,Operation),
     (
         // The following instructions are only decoded with CS_MODE_MCLASS.
+        // TODO: *some* MRS/MSR can be decoded without CS_MODE_MCLASS. We
+        // should refine this rule to only match the ones that cannot.
         substr(Operation,0,3) = "MRS";
         substr(Operation,0,3) = "MSR"
     ).
+
+// LDCL is not available on ARMv8+
+// It could be v7 or anything older, but we guess v7 to provide maximum
+// compatibility.
+inferred_arch_info("Arch","v7"):-
+    !arch_info("Arch",_),
+    code_in_refined_block(EA,_),
+    instruction_get_operation(EA,"LDCL").
+
+// Create a target only if there's only one possible instruction mode at the
+// address. Creating both as potential targets creates too many false
+// positives.
+basic_target(Inst):-
+    arm_exidx_entry(Start),
+    arch.instruction_at(Start,Inst),
+    invalid(Inst bxor 1,_).
+
+// Always split blocks at arm_exidx_entry.
+block_limit(Inst):-
+    arm_exidx_entry(Start),
+    arch.instruction_at(Start,Inst).
+
+// exidx metadata doesn't set the low bit to indicate Thumb, so we can only use
+// it as a source of known block if the address isn't both an ARM and Thumb
+// block.
+known_block(Block,"code",".ARM.exidx"):-
+    arm_exidx_entry(Start),
+    arch.instruction_at(Start,Block),
+    block_candidate_boundaries(Block,"code",_,_),
+    !block_candidate_boundaries(Block bxor 1,"code",_,_).
+
+// a block that overlaps both potential .ARM.exidx functions must not exist.
+impossible_block(Other,"data","overlaps .ARM.exidx"):-
+    arm_exidx_entry(Start),
+    BlockArm = Start,
+    BlockThumb = Start bor 1,
+    block_candidate_boundaries(BlockArm,"code",_,EndArm),
+    block_candidate_boundaries(BlockThumb,"code",_,EndThumb),
+    block_candidate_boundaries(Other,"data",DataStart,DataEnd),
+    DataStart < min(EndArm, EndThumb),
+    Start < DataEnd.

@@ -41,7 +41,6 @@ In these jump tables, the reference address coincides with the starting address
 of the jump table.
 */
 .decl relative_address(EA:address,Size:unsigned,TableStart:address,Reference:address,Dest:address,DestIsFirstOrSecond:symbol)
-.output relative_address
 
 .decl relative_address_start(EA:address,Size:unsigned,Reference:address,Dest:address, DestIsFirstOrSecond:symbol)
 
@@ -124,6 +123,37 @@ jump_table_element_access(EA,Size,TableStartAddr,RegIndex_nn):-
     TableStartAddr >= Beg,
     TableStartAddr <= End.
 
+/**
+The following case was observed in libc.so (v2.36):
+movslq .L_191058(%rip),%rdi
+leaq .L_191058(%rip),%r8
+addq %r8,%rdi
+jmpq *%rdi
+...
+.L_191058:
+    .long .L_129b24-.L_191058
+    .long .L_129db0-.L_191058
+    .long .L_129d20-.L_191058
+    .long .L_129ef0-.L_191058
+    .long .L_129db0-.L_191058
+
+In the data access, the base register is PC and there is no index register.
+*/
+jump_table_element_access(EA,Size,TableStartAddr,"NONE"):-
+    pc_relative_operand(EA,1,TableStartAddr),
+    data_access(EA,_,_,_,_,_,_,Size),
+    def_used_for_address(EA,_,Type),
+    (
+        Type = "Jump"; Type = "Call"
+    ),
+    reg_def_use.def_used(EA,Reg1,EA_add,_),
+    reg_def_use.def_used(EA2,Reg2,EA_add,_),
+    take_address(EA2,TableStartAddr),
+    arch.reg_reg_arithmetic_operation(EA_add,_,Reg2,Reg1,1,0),
+    data_segment(Beg,End),
+    TableStartAddr >= Beg,
+    TableStartAddr <= End.
+
 // sometimes the regBase contains the index (already multiplied)
 // and the regIndex contains the base address
 jump_table_element_access(EA,Size,TableStartAddr,RegBase_nn):-
@@ -140,7 +170,6 @@ jump_table_element_access(EA,Size,TableStartAddr,RegBase_nn):-
 Find sign extensions of the jump table element.
 */
 .decl jump_table_signed(TableStart:address,Signed:unsigned)
-.output jump_table_signed
 
 // The value is explicitly extended when loaded from memory.
 jump_table_signed(TableStart,Signed):-
@@ -180,19 +209,18 @@ jump_table_signed(TableStart,Signed):-
 The end of a jump table as identified by a boundary value of the index register.
 */
 .decl jump_table_max(TableStart:address,TableEnd:address)
-.output jump_table_max
 
 jump_table_max(TableStart,TableStart+as(Value,unsigned)*Size):-
     jump_table_element_access(EA,Size,TableStart,RegIndex),
     code_in_block(EA,Block),
     (
         // The register was not previously defined in this block.
-        !block_last_def(EA,_,RegIndex),
-        last_value_reg_limit(_,Block,RegIndex,Value,"MAX")
+        !reg_def_use.block_last_def(EA,_,RegIndex),
+        last_value_reg_limit(_,Block,RegIndex,Value,"MAX",_)
         ;
         // Register is defined in the block - check for a propagated limit.
-        block_last_def(EA,EA_def,RegIndex), UNUSED(Block),
-        last_value_reg_limit(EA_def,_,RegIndex,Value,"MAX")
+        reg_def_use.block_last_def(EA,EA_def,RegIndex), UNUSED(Block),
+        last_value_reg_limit(EA_def,_,RegIndex,Value,"MAX",_)
     ),
     Value >= 0.
 
@@ -218,7 +246,7 @@ jump_table_max(TableStart,TableStart+as(Value,unsigned)*Size):-
 jump_table_max(TableStart2,TableStart2+IndexValue*Size2):-
     jump_table_element_access(EA1,Size1,TableStart1,_),
     jump_table_max(TableStart1,TableEnd1),
-    def_used(EA1,Reg,EA2,_),
+    reg_def_use.def_used(EA1,Reg,EA2,_),
     jump_table_element_access(EA2,Size2,TableStart2,Reg),
     TableAddress = range(TableStart1,TableEnd1+Size1,Size1),
     data_uword(TableAddress,Size1,IndexValue).
@@ -227,7 +255,6 @@ jump_table_max(TableStart2,TableStart2+IndexValue*Size2):-
 A jump table begins at TableStart.
 */
 .decl jump_table_start(EA_jump:address,Size:unsigned,TableStart:address,TableRef:address,Scale:number)
-.output jump_table_start
 
 jump_table_start(EA_jump,Size,TableStart,as(Base,address),Scale):-
     // Looks like a jump table access occurs at EA...
@@ -236,7 +263,7 @@ jump_table_start(EA_jump,Size,TableStart,as(Base,address),Scale):-
     value_reg(EA_add,RegJump,EA,Reg,Scale,Base,_),
     Reg != "NONE",
     // ...and something jumps to that register.
-    def_used(EA_add,RegJump,EA_jump,_),
+    reg_def_use.def_used(EA_add,RegJump,EA_jump,_),
     (
         reg_call(EA_jump,_);
         reg_jump(EA_jump,_)
@@ -249,7 +276,7 @@ jump_table_start(EA_jump,Size,TableStart,as(Base,address),Scale):-
 jump_table_start(EA_jump,Size,TableStart,TableReferenceAddr,Scale):-
     reg_jump(EA_jump,_),
     code(EA_jump),
-    def_used(EA_base,Reg,EA_jump,_),
+    reg_def_use.def_used(EA_base,Reg,EA_jump,_),
     instruction_get_operation(EA_base,Operation),
     (
         Operation = "ADD", Scale=1;
@@ -271,11 +298,11 @@ jump_table_start(EA_jump,4,TableStart,TableReference,1):-
     got_reference_pointer(TableReference),
     // Load offset.
     got_relative_operand(EA_load,1,TableStart),
-    def_used(EA_load,Reg_got,EA_base,_),
+    reg_def_use.def_used(EA_load,Reg_got,EA_base,_),
     // Base is GOT.
     arch.reg_reg_arithmetic_operation(EA_base,Reg_jump,Reg_got,_,1,0),
     // Jump to register.
-    def_used(EA_base,_,EA_jump,_),
+    reg_def_use.def_used(EA_base,_,EA_jump,_),
     reg_jump(EA_jump,Reg_jump).
 
 // add ECX,DWORD PTR [ECX+EAX*4+.L_804a008@GOTOFF]
@@ -285,7 +312,7 @@ jump_table_start(EA_jump,4,TableStart,TableReference,1):-
     got_reference_pointer(TableReference),
     got_relative_operand(EA_add,1,TableStart),
     instruction_get_operation(EA_add,"ADD"),
-    def_used(EA_add,Reg_jump,EA_jump,_),
+    reg_def_use.def_used(EA_add,Reg_jump,EA_jump,_),
     reg_jump(EA_jump,Reg_jump).
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -323,7 +350,6 @@ Some of these are discarded to form relative_jump_table_entry, which is used by
 symbolization.
 */
 .decl relative_jump_table_entry_candidate(EA:address,TableStart:address,Size:unsigned,Reference:address,Dest:address,Scale:number,Offset:number)
-.output relative_jump_table_entry_candidate
 
 relative_jump_table_entry_candidate(TableStart,TableStart,Size,Reference,Dest,Scale,0):-
     !binary_isa("ARM"),
@@ -359,7 +385,6 @@ relative_jump_table_entry_candidate(EA,TableStart,Size,Reference,Dest,Scale,Offs
     relative_jump_table_entry_target(EA,TableStart,Size,Reference,Dest,Scale).
 
 .decl discarded_jump_table_entry(TableStart:address,TableRef:address,EA:address)
-.output discarded_jump_table_entry
 
 // Prefer jump tables where TableRef = TableStart, if there is a conflict.
 discarded_jump_table_entry(TableStart,TableRef1,TableStart):-
@@ -371,7 +396,12 @@ discarded_jump_table_entry(TableStart,TableRef1,TableStart):-
 // Truncate a jump table if a separate data access is encountered.
 discarded_jump_table_entry(TableStart,Ref,EA):-
     relative_jump_table_entry_candidate(EA,TableStart,Size,Ref,_,_,_),
-    data_limit(Limit),
+    (
+        symbolic_operand(_,_,Limit,"data");
+        data_segment(Limit,_);
+        data_segment(_,Limit);
+        jump_table_start(_,_,Limit,_,_)
+    ),
     EA <= Limit, Limit < EA+Size,
     EA != TableStart.
 
@@ -390,7 +420,6 @@ CFG generation. This allows using the final results of value analysis to
 resolve overlapping jump tables.
 */
 .decl relative_jump_table_entry(EA:address,TableStart:address,Size:unsigned,Reference:address,Dest:address,Scale:number,Offset:number)
-.output relative_jump_table_entry
 
 relative_jump_table_entry(EA,TableStart,Size,Reference,Dest,Scale,Offset):-
     relative_jump_table_entry_candidate(EA,TableStart,Size,Reference,Dest,Scale,Offset),

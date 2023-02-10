@@ -53,14 +53,13 @@ souffle::tuple &operator>>(souffle::tuple &t, uint8_t &byte)
 
 struct DecodedInstruction
 {
-    gtirb::Addr EA;
-    uint64_t Size;
     std::map<uint64_t, std::variant<ImmOp, IndirectOp>> Operands;
     uint64_t immediateOffset;
     uint64_t displacementOffset;
 };
 
-std::map<gtirb::Addr, DecodedInstruction> recoverInstructions(souffle::SouffleProgram *prog)
+std::map<gtirb::Addr, DecodedInstruction> recoverInstructions(souffle::SouffleProgram *prog,
+                                                              std::set<gtirb::Addr> &code)
 {
     std::map<uint64_t, ImmOp> Immediates;
     for(auto &output : *prog->getRelation("op_immediate"))
@@ -83,10 +82,20 @@ std::map<gtirb::Addr, DecodedInstruction> recoverInstructions(souffle::SoufflePr
     std::map<gtirb::Addr, DecodedInstruction> insns;
     for(auto &output : *prog->getRelation("instruction"))
     {
-        DecodedInstruction insn;
         gtirb::Addr EA;
+        output >> EA;
+
+        // Don't bother recovering instructions that aren't considered code.
+        if(code.count(EA) == 0)
+        {
+            continue;
+        }
+
+        DecodedInstruction insn;
+        uint64_t size;
         std::string prefix, opcode;
-        output >> EA >> insn.Size >> prefix >> opcode;
+        output >> size >> prefix >> opcode;
+
         for(size_t i = 1; i <= 4; i++)
         {
             uint64_t operandIndex;
@@ -127,7 +136,7 @@ struct BlockInformation
 
     BlockInformation(souffle::tuple &tuple)
     {
-        assert(tuple.size() == 3);
+        assert(tuple.size() == 4);
         tuple >> EA >> size;
     };
 
@@ -248,17 +257,6 @@ struct SymbolicInfo
     VectorByEA<SymbolicExprAttribute> SymbolicExprAttributes;
 };
 
-template <typename T>
-std::vector<T> convertRelation(const std::string &relation, souffle::SouffleProgram *prog)
-{
-    std::vector<T> result;
-    for(auto &output : *prog->getRelation(relation))
-    {
-        result.emplace_back(output);
-    }
-    return result;
-}
-
 template <typename Container, typename Elem = typename Container::value_type>
 Container convertSortedRelation(const std::string &relation, souffle::SouffleProgram *prog)
 {
@@ -290,6 +288,18 @@ std::string stripSymbolVersion(const std::string Name)
         return Name.substr(0, I);
     }
     return Name;
+}
+
+void removeEntryPoint(gtirb::Module &Module)
+{
+    // Remove initial entry point.
+    // ElfReader and PeReader create a code block with zero size to set the entrypoint.
+    // It's no longer needed; we connect it to a real code block once it's created.
+    if(gtirb::CodeBlock *Block = Module.getEntryPoint())
+    {
+        Block->getByteInterval()->removeBlock(Block);
+    }
+    Module.setEntryPoint(nullptr);
 }
 
 void removeSectionSymbols(gtirb::Context &Context, gtirb::Module &Module)
@@ -415,23 +425,20 @@ void buildSymbolForwarding(gtirb::Context &Context, gtirb::Module &Module,
                            souffle::SouffleProgram *Prog)
 {
     std::map<gtirb::UUID, gtirb::UUID> SymbolForwarding;
-    for(auto &T : *Prog->getRelation("relocation"))
+    for(auto &T : *Prog->getRelation("copy_relocated_symbol"))
     {
         gtirb::Addr EA;
-        int64_t Offset;
-        std::string Type, Name;
-        T >> EA >> Type >> Name >> Offset;
-        if(Type == "COPY")
+        std::string Name;
+        T >> EA >> Name;
+
+        gtirb::Symbol *CopySymbol = findSymbol(Module, EA, Name);
+        if(CopySymbol)
         {
-            gtirb::Symbol *CopySymbol = findSymbol(Module, EA, Name);
-            if(CopySymbol)
-            {
-                gtirb::Symbol *RealSymbol = Module.addSymbol(Context, Name);
-                RealSymbol->setReferent(Module.addProxyBlock(Context));
-                Name = stripSymbolVersion(Name);
-                CopySymbol->setName(Name + "_copy");
-                SymbolForwarding[CopySymbol->getUUID()] = RealSymbol->getUUID();
-            }
+            gtirb::Symbol *RealSymbol = Module.addSymbol(Context, Name);
+            RealSymbol->setReferent(Module.addProxyBlock(Context));
+            Name = stripSymbolVersion(Name);
+            CopySymbol->setName(Name + "_copy");
+            SymbolForwarding[CopySymbol->getUUID()] = RealSymbol->getUUID();
         }
     }
     for(auto &T : *Prog->getRelation("abi_intrinsic"))
@@ -457,33 +464,31 @@ gtirb::SymAttributeSet buildSymbolicExpressionAttributes(
     gtirb::Addr EA, const VectorByEA<SymbolicExprAttribute> &SymbolicDataAttributes)
 {
     const static std::map<std::string, gtirb::SymAttribute> AttributeMap = {
-        {"Part0", gtirb::SymAttribute::Part0},
-        {"Part1", gtirb::SymAttribute::Part1},
-        {"Part2", gtirb::SymAttribute::Part2},
-        {"Part3", gtirb::SymAttribute::Part3},
-        {"AddrRelGot", gtirb::SymAttribute::AddrRelGot},
-        {"GotRef", gtirb::SymAttribute::GotRef},
-        {"GotRelPC", gtirb::SymAttribute::GotRelPC},
-        {"GotRelGot", gtirb::SymAttribute::GotRelGot},
-        {"GotRelAddr", gtirb::SymAttribute::GotRelAddr},
-        {"GotPage", gtirb::SymAttribute::GotPage},
-        {"GotPageOfst", gtirb::SymAttribute::GotPageOfst},
-        {"PltRef", gtirb::SymAttribute::PltRef},
-        {"TpOff", gtirb::SymAttribute::TpOff},
-        {"TlsLd", gtirb::SymAttribute::TlsLd},
-        {"TlsGd", gtirb::SymAttribute::TlsGd},
-        {"GotOff", gtirb::SymAttribute::GotOff},
-        {"NtpOff", gtirb::SymAttribute::NtpOff},
-        {"DtpOff", gtirb::SymAttribute::DtpOff},
-        {"Lo12", gtirb::SymAttribute::Lo12},
-        {"Hi", gtirb::SymAttribute::Hi},
-        {"Lo", gtirb::SymAttribute::Lo}};
+        // ELF (common)
+        {"GOT", gtirb::SymAttribute::GOT},
+        {"GOTPC", gtirb::SymAttribute::GOTPC},
+        {"GOTOFF", gtirb::SymAttribute::GOTOFF},
+        {"PCREL", gtirb::SymAttribute::PCREL},
+        {"PLT", gtirb::SymAttribute::PLT},
+        {"TPOFF", gtirb::SymAttribute::TPOFF},
+        {"DTPOFF", gtirb::SymAttribute::DTPOFF},
+        {"NTPOFF", gtirb::SymAttribute::NTPOFF},
+        {"TLSGD", gtirb::SymAttribute::TLSGD},
+        {"TLSLD", gtirb::SymAttribute::TLSLD},
+        // ARM
+        {"G0", gtirb::SymAttribute::G0},
+        {"G1", gtirb::SymAttribute::G1},
+        {"LO12", gtirb::SymAttribute::LO12},
+        // MIPS
+        {"HI", gtirb::SymAttribute::HI},
+        {"LO", gtirb::SymAttribute::LO},
+    };
     gtirb::SymAttributeSet Attributes;
 
     auto Range = SymbolicDataAttributes.equal_range(EA);
     for(auto It = Range.first; It != Range.second; It++)
     {
-        Attributes.addFlag(AttributeMap.at(It->Type));
+        Attributes.insert(AttributeMap.at(It->Type));
     }
 
     return Attributes;
@@ -582,17 +587,24 @@ void buildSymbolicExpr(gtirb::Module &Module, const gtirb::Addr &Ea,
 
 void buildCodeSymbolicInformation(gtirb::Module &Module, souffle::SouffleProgram *Prog)
 {
-    auto codeInBlock = convertRelation<CodeInBlock>("code_in_refined_block", Prog);
+    std::set<gtirb::Addr> Code;
+    for(auto &output : *Prog->getRelation("code_in_refined_block"))
+    {
+        gtirb::Addr EA;
+        output >> EA;
+        Code.insert(EA);
+    }
+
     SymbolicInfo symbolicInfo{
         convertSortedRelation<VectorByEA<SymbolicExpr>>("symbolic_expr", Prog),
         convertSortedRelation<VectorByEA<SymExprSymbolMinusSymbol>>(
             "symbolic_expr_symbol_minus_symbol", Prog),
         convertSortedRelation<VectorByEA<SymbolicExprAttribute>>("symbolic_expr_attribute", Prog)};
-    std::map<gtirb::Addr, DecodedInstruction> decodedInstructions = recoverInstructions(Prog);
+    std::map<gtirb::Addr, DecodedInstruction> decodedInstructions = recoverInstructions(Prog, Code);
 
-    for(auto &Cib : codeInBlock)
+    for(auto &EA : Code)
     {
-        const auto Inst = decodedInstructions.find(Cib.EA);
+        const auto Inst = decodedInstructions.find(EA);
         assert(Inst != decodedInstructions.end());
         for(auto &Op : Inst->second.Operands)
         {
@@ -864,6 +876,18 @@ void connectSymbolsToBlocks(gtirb::Context &Context, gtirb::Module &Module,
                     gtirb::Node &Block = BlockIt.front();
                     ConnectToBlock[&Symbol] = {&Block, false};
                     continue;
+                }
+
+                if((Module.getISA() == gtirb::ISA::ARM) && ((static_cast<uint64_t>(Addr) & 1) == 0))
+                {
+                    // If a Thumb block starts here, connect to it.
+                    // CodeBlocks still are located at +1 until shiftThumbBlocks() executes.
+                    if(auto It = Module.findCodeBlocksAt(Addr + 1); !It.empty())
+                    {
+                        gtirb::CodeBlock &Block = It.front();
+                        ConnectToBlock[&Symbol] = {&Block, false};
+                        continue;
+                    }
                 }
             }
             if(auto It = Module.findCodeBlocksOn(Addr); !It.empty())
@@ -1207,100 +1231,139 @@ void buildPadding(gtirb::Module &Module, souffle::SouffleProgram *Prog)
 void buildComments(gtirb::Module &Module, souffle::SouffleProgram *Prog, bool SelfDiagnose)
 {
     std::map<gtirb::Offset, std::string> Comments;
-    for(auto &Output : *Prog->getRelation("data_access_pattern"))
+    auto *data_access_pattern = Prog->getRelation("data_access_pattern");
+    if(data_access_pattern)
     {
-        gtirb::Addr Ea;
-        uint64_t Size, From;
-        int64_t Multiplier;
-        Output >> Ea >> Size >> Multiplier >> From;
-        std::ostringstream NewComment;
-        NewComment << "data_access(" << Size << ", " << Multiplier << ", " << std::hex << From
-                   << std::dec << ")";
-        updateComment(Module, Comments, Ea, NewComment.str());
+        for(auto &Output : *data_access_pattern)
+        {
+            gtirb::Addr Ea;
+            uint64_t Size, From;
+            int64_t Multiplier;
+            Output >> Ea >> Size >> Multiplier >> From;
+            std::ostringstream NewComment;
+            NewComment << "data_access(" << Size << ", " << Multiplier << ", " << std::hex << From
+                       << std::dec << ")";
+            updateComment(Module, Comments, Ea, NewComment.str());
+        }
     }
 
-    for(auto &Output : *Prog->getRelation("preferred_data_access"))
+    auto *preferred_data_access = Prog->getRelation("preferred_data_access");
+    if(preferred_data_access)
     {
-        gtirb::Addr Ea;
-        uint64_t Size, DataAccess;
-        Output >> Ea >> Size >> DataAccess;
-        std::ostringstream NewComment;
-        NewComment << "preferred_data_access(" << Size << ", " << std::hex << DataAccess << std::dec
-                   << ")";
-        updateComment(Module, Comments, Ea, NewComment.str());
+        for(auto &Output : *preferred_data_access)
+        {
+            gtirb::Addr Ea;
+            uint64_t Size, DataAccess;
+            Output >> Ea >> Size >> DataAccess;
+            std::ostringstream NewComment;
+            NewComment << "preferred_data_access(" << Size << ", " << std::hex << DataAccess
+                       << std::dec << ")";
+            updateComment(Module, Comments, Ea, NewComment.str());
+        }
     }
 
-    for(auto &Output : *Prog->getRelation("best_value_reg"))
+    auto *best_value_reg = Prog->getRelation("best_value_reg");
+    if(best_value_reg)
     {
-        gtirb::Addr Ea, EaOrigin;
-        std::string Reg, Type;
-        int64_t Multiplier, Offset;
-        Output >> Ea >> Reg >> EaOrigin >> Multiplier >> Offset >> Type;
-        std::ostringstream NewComment;
-        NewComment << Reg << "=X*" << Multiplier << "+" << std::hex << Offset << std::dec
-                   << " type(" << Type << ")";
-        updateComment(Module, Comments, Ea, NewComment.str());
+        for(auto &Output : *best_value_reg)
+        {
+            gtirb::Addr Ea, EaOrigin;
+            std::string Reg, Type;
+            int64_t Multiplier, Offset;
+            Output >> Ea >> Reg >> EaOrigin >> Multiplier >> Offset >> Type;
+            std::ostringstream NewComment;
+            NewComment << Reg << "=X*" << Multiplier << "+" << std::hex << Offset << std::dec
+                       << " type(" << Type << ")";
+            updateComment(Module, Comments, Ea, NewComment.str());
+        }
     }
 
-    for(auto &Output : *Prog->getRelation("value_reg"))
+    auto *value_reg = Prog->getRelation("value_reg");
+    if(value_reg)
     {
-        gtirb::Addr Ea, Ea2;
-        std::string Reg, Reg2;
-        int64_t Multiplier, Offset;
-        Output >> Ea >> Reg >> Ea2 >> Reg2 >> Multiplier >> Offset;
-        std::ostringstream NewComment;
-        NewComment << Reg << "=(" << Reg2 << "," << std::hex << Ea2 << std::dec << ")*"
-                   << Multiplier << "+" << std::hex << Offset << std::dec;
-        updateComment(Module, Comments, Ea, NewComment.str());
+        for(auto &Output : *value_reg)
+        {
+            gtirb::Addr Ea, Ea2;
+            std::string Reg, Reg2;
+            int64_t Multiplier, Offset;
+            Output >> Ea >> Reg >> Ea2 >> Reg2 >> Multiplier >> Offset;
+            std::ostringstream NewComment;
+            NewComment << Reg << "=(" << Reg2 << "," << std::hex << Ea2 << std::dec << ")*"
+                       << Multiplier << "+" << std::hex << Offset << std::dec;
+            updateComment(Module, Comments, Ea, NewComment.str());
+        }
     }
 
-    for(auto &Output : *Prog->getRelation("moved_label_class"))
+    auto *moved_label_class = Prog->getRelation("moved_label_class");
+    if(moved_label_class)
     {
-        gtirb::Addr Ea;
-        uint64_t OpIndex;
-        std::string Type;
+        for(auto &Output : *moved_label_class)
+        {
+            gtirb::Addr Ea;
+            uint64_t OpIndex;
+            std::string Type;
 
-        Output >> Ea >> OpIndex >> Type;
-        std::ostringstream NewComment;
-        NewComment << " moved label-" << Type;
-        updateComment(Module, Comments, Ea, NewComment.str());
+            Output >> Ea >> OpIndex >> Type;
+            std::ostringstream NewComment;
+            NewComment << " moved label-" << Type;
+            updateComment(Module, Comments, Ea, NewComment.str());
+        }
     }
 
-    for(auto &Output : *Prog->getRelation("def_used"))
+    auto *reg_def_use_def_used = Prog->getRelation("reg_def_use.def_used");
+    if(reg_def_use_def_used)
     {
-        gtirb::Addr EaUse, EaDef;
-        uint64_t Index;
-        std::string Reg;
-        Output >> EaDef >> Reg >> EaUse >> Index;
-        std::ostringstream NewComment;
-        NewComment << "def(" << Reg << ", " << std::hex << EaDef << std::dec << ")";
-        updateComment(Module, Comments, EaUse, NewComment.str());
+        for(auto &Output : *reg_def_use_def_used)
+        {
+            gtirb::Addr EaUse, EaDef;
+            uint64_t Index;
+            std::string Reg;
+            Output >> EaDef >> Reg >> EaUse >> Index;
+            std::ostringstream NewComment;
+            NewComment << "def(" << Reg << ", " << std::hex << EaDef << std::dec << ")";
+            updateComment(Module, Comments, EaUse, NewComment.str());
+        }
     }
-    for(auto &Output : *Prog->getRelation("missed_jump_table"))
+
+    auto *missed_jump_table = Prog->getRelation("missed_jump_table");
+    if(missed_jump_table)
     {
-        gtirb::Addr Ea;
-        Output >> Ea;
-        std::ostringstream NewComment;
-        NewComment << "missed_jump_table";
-        updateComment(Module, Comments, Ea, NewComment.str());
+        for(auto &Output : *missed_jump_table)
+        {
+            gtirb::Addr Ea;
+            Output >> Ea;
+            std::ostringstream NewComment;
+            NewComment << "missed_jump_table";
+            updateComment(Module, Comments, Ea, NewComment.str());
+        }
     }
-    for(auto &Output : *Prog->getRelation("reg_has_base_image"))
+
+    auto *reg_has_base_image = Prog->getRelation("reg_has_base_image");
+    if(reg_has_base_image)
     {
-        gtirb::Addr Ea;
-        std::string Reg;
-        Output >> Ea >> Reg;
-        std::ostringstream NewComment;
-        NewComment << "hasImageBase(" << Reg << ")";
-        updateComment(Module, Comments, Ea, NewComment.str());
+        for(auto &Output : *reg_has_base_image)
+        {
+            gtirb::Addr Ea;
+            std::string Reg;
+            Output >> Ea >> Reg;
+            std::ostringstream NewComment;
+            NewComment << "hasImageBase(" << Reg << ")";
+            updateComment(Module, Comments, Ea, NewComment.str());
+        }
     }
-    for(auto &T : *Prog->getRelation("reg_has_got"))
+
+    auto *reg_has_got = Prog->getRelation("reg_has_got");
+    if(reg_has_got)
     {
-        gtirb::Addr EA;
-        std::string Reg;
-        T >> EA >> Reg;
-        std::ostringstream Comment;
-        Comment << "GOT(" << Reg << ")";
-        updateComment(Module, Comments, EA, Comment.str());
+        for(auto &T : *reg_has_got)
+        {
+            gtirb::Addr EA;
+            std::string Reg;
+            T >> EA >> Reg;
+            std::ostringstream Comment;
+            Comment << "GOT(" << Reg << ")";
+            updateComment(Module, Comments, EA, Comment.str());
+        }
     }
     if(SelfDiagnose)
     {
@@ -1378,58 +1441,34 @@ void shiftThumbBlocks(gtirb::Module &Module)
     }
 }
 
-void renameInferredSymbols(gtirb::Module &Module)
-{
-    std::map<gtirb::Symbol *, std::string> NewNames;
-    for(gtirb::Symbol &Sym : Module.symbols())
-    {
-        std::regex Pattern("(?:.L_|FUN_)(\\d+)(?:_END|_IFUNC|)");
-        std::smatch Matches;
-        const std::string &Name = Sym.getName();
-        if(std::regex_match(Name, Matches, Pattern))
-        {
-            try
-            {
-                std::stringstream S;
-                S << Name.substr(0, Matches.position(1)) << std::hex << std::stoull(Matches.str(1))
-                  << Name.substr(Matches.position(1) + Matches.length(1));
-                NewNames[&Sym] = S.str();
-            }
-            catch(std::invalid_argument const &Ex)
-            {
-                std::cerr << "ERROR: could not rename symbol '" << Name << "' to hex" << std::endl;
-            }
-            catch(std::out_of_range const &Ex)
-            {
-                std::cerr << "ERROR: could not rename symbol '" << Name
-                          << "' to hex (invalid range)" << std::endl;
-            }
-        }
-    }
-    for(auto [Sym, NewName] : NewNames)
-    {
-        Sym->setName(NewName);
-    }
-}
-
 void buildArchInfo(gtirb::Module &Module, souffle::SouffleProgram *Prog)
 {
     if(Module.getISA() == gtirb::ISA::ARM)
     {
         // ArchInfo may have been extracted from the .ARM.attributes section.
-        // Note that currently, we only check if the binary is Microcontroller
-        // or not.
         auto *ArchInfo0 = Module.getAuxData<gtirb::schema::ArchInfo>();
         if(!ArchInfo0)
         {
-            // If the information is not found, see if there's any block
-            // containing Microcontroller-specific instructions, such as MSR
-            // and MRS.
-            auto Mblocks = Prog->getRelation("arm_microcontroller");
-            if(Mblocks && Mblocks->size() > 0)
+            // If the information is not found, see if the datalog inferred any
+            // arch information.
+            std::map<std::string, std::string> ArchInfo;
+            for(auto &output : *Prog->getRelation("inferred_arch_info"))
             {
-                std::vector<std::string> ArchInfo;
-                ArchInfo.emplace_back("Microcontroller");
+                std::string Key;
+                std::string Value;
+                output >> Key >> Value;
+
+                auto It = ArchInfo.find(Key);
+                if(It != ArchInfo.end())
+                {
+                    std::cerr << "WARNING: Conflicting values for ArchInfo " << Key << ": "
+                              << It->second << ", " << Value << "\n";
+                }
+                ArchInfo[Key] = Value;
+            }
+
+            if(ArchInfo.size() > 0)
+            {
                 Module.addAuxData<gtirb::schema::ArchInfo>(std::move(ArchInfo));
             }
         }
@@ -1440,6 +1479,7 @@ void disassembleModule(gtirb::Context &Context, gtirb::Module &Module,
                        souffle::SouffleProgram *Prog, bool SelfDiagnose)
 {
     removeSectionSymbols(Context, Module);
+    removeEntryPoint(Module);
     buildInferredSymbols(Context, Module, Prog);
     buildSymbolForwarding(Context, Module, Prog);
     buildCodeBlocks(Context, Module, Prog);
@@ -1451,7 +1491,6 @@ void disassembleModule(gtirb::Context &Context, gtirb::Module &Module,
     buildFunctions(Module, Prog);
     // This should be done after creating all the symbols.
     connectSymbolsToBlocks(Context, Module, Prog);
-    renameInferredSymbols(Module);
     // These functions should not create additional symbols.
     buildCFG(Context, Module, Prog);
     buildPadding(Module, Prog);
@@ -1465,7 +1504,7 @@ void disassembleModule(gtirb::Context &Context, gtirb::Module &Module,
     }
 }
 
-void performSanityChecks(souffle::SouffleProgram *prog, bool selfDiagnose)
+bool performSanityChecks(souffle::SouffleProgram *prog, bool selfDiagnose)
 {
     bool error = false;
     if(selfDiagnose)
@@ -1508,11 +1547,9 @@ void performSanityChecks(souffle::SouffleProgram *prog, bool selfDiagnose)
                       << BlockKind2 << ")" << std::dec << std::endl;
         }
     }
-    if(error)
-    {
-        std::cerr << "Aborting" << std::endl;
-        exit(1);
-    }
     if(selfDiagnose && !error)
+    {
         std::cout << "Self diagnose completed: No errors found" << std::endl;
+    }
+    return error;
 }

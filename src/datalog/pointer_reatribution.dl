@@ -57,7 +57,6 @@ A symbolic expression at address 'EA' pointing to 'Dest' should use a
 symbol pointing to 'NewDest' plus an offset . The offset is NewDest-Dest.
 */
 .decl moved_data_label(EA:address,Size:unsigned,Dest:address,NewDest:address)
-.output moved_data_label
 
 /**
 A symbolic operand at address 'EA' with index 'Index' and pointing to 'Dest'
@@ -65,7 +64,6 @@ should use a symbol pointing to 'NewDest' plus an offset.
 The offset is NewDest-Dest.
 */
 .decl moved_label(EA:address,Index:operand_index,Dest:address,NewDest:address)
-.output moved_label
 
 
 /**
@@ -76,7 +74,6 @@ point to an 'at-end' symbol.
 
 // this predicate is just for debugging purposes
 .decl moved_label_class(EA:address,Index:operand_index,Reason:symbol)
-.output moved_label_class
 
 ////////////////////////////////////////////////////////////////////////////////////
 
@@ -107,10 +104,10 @@ moved_data_label(EA,SizePointer,Dest,Address):-
 moved_pc_relative_candidate(EA_def2,Op_index,Dest,NewDest,Diff):-
     binary_format("ELF"),
     cmp_reg_to_reg(EA,Reg1,Reg2),
-    def_used(EA_def1,Reg1,EA,_),
+    reg_def_use.def_used(EA_def1,Reg1,EA,_),
     dest_enlarged_data_section(EA_def1,Reg1,NewDest,Beg,End,OldBeg,OldEnd),
 
-    def_used(EA_def2,Reg2,EA,_),
+    reg_def_use.def_used(EA_def2,Reg2,EA,_),
     pc_relative_operand(EA_def2,Op_index,Dest),
     instruction_get_operation(EA_def2,"LEA"),
 
@@ -209,7 +206,6 @@ moved_displacement_candidate(EA,Op_index,Dest,NewDest,Diff):-
     ).
 
 .decl moved_displacement_candidate(EA:address,Op_index:operand_index,Dest:address,NewDest:address,Priority:unsigned)
-.output moved_displacement_candidate
 
 moved_label_class(EA,Op_index,"miss section with access"),
 moved_displacement_candidate(EA,Op_index,as(Dest,address),AccessDest,1):-
@@ -230,7 +226,7 @@ moved_displacement_candidate(EA,Op_index,as(Dest,address),AccessDest,1):-
     Diff = max(AccessDest,DestAddr) - min(AccessDest,DestAddr),
     10*DestAddr >= Base,
     // the remaining component does not fall on any data or code section
-    @functor_data_exists(Diff,1) = 0,
+    @functor_data_valid(Diff,1) = 0,
     // does not fall in bss sections
     bss_section_limits(BssBeg,BssEnd),
     (
@@ -368,7 +364,6 @@ cmp_reg_to_reg(EA,Reg1,Reg2):-
 
 .decl dest_enlarged_data_section(EA:address,Reg:register,NewDest:address,
             Beg:address,End:address,OldBeg:address,OldEnd:address)
-.output dest_enlarged_data_section
 
 dest_enlarged_data_section(EA_def,Reg,NewDestAddr,Beg-MultAbs,End+MultAbs,Beg,End):-
     best_value_reg(EA_def,Reg,_,Mult,NewDest,"loop"), NewDest >= 0,
@@ -386,11 +381,11 @@ dest_enlarged_data_section(EA_def,Reg,NewDestAddr,Beg-MultAbs,End+MultAbs,Beg,En
 // cmp RBX,OFFSET state-1408
 dest_enlarged_data_section(EA_def,Reg,NewDestAddr,Beg-MultAbs-OffsetAddr,End+MultAbs-OffsetAddr,Beg,End):-
     best_value_reg(EA_def,Reg,EA_from,Mult,_,"loop"),
-    def_used(EA_def,Reg,EA_used,Op_index),
+    reg_def_use.def_used(EA_def,Reg,EA_used,Op_index),
     value_reg_at_operand_loop(EA_used,Op_index,Reg,EA_from,Mult,NewDest,"loop"), NewDest >= 0,
     data_access(EA_used,Op_index,"NONE",Reg,"NONE",_,Offset,_), Offset > 0,
     OffsetAddr = as(Offset,address),
-    @functor_data_exists(OffsetAddr,1) = 0,
+    @functor_data_valid(OffsetAddr,1) = 0,
     NewDestAddr = as(NewDest,address),
     MultAbs = as(max(Mult,-Mult),unsigned),
     regular_data_section(Name),
@@ -435,7 +430,7 @@ moved_immediate_candidate(EA,Imm_index,ImmediateAddr,NewDest):-
     binary_type("EXEC"),
     cmp_immediate_to_reg(EA,Reg,Imm_index,Immediate), Immediate >= 0,
     ImmediateAddr = as(Immediate,address),
-    def_used(EA_def,Reg,EA,_),
+    reg_def_use.def_used(EA_def,Reg,EA,_),
     dest_enlarged_data_section(EA_def,Reg,NewDest,Beg,End,OldBeg,OldEnd),
     Beg <= ImmediateAddr, ImmediateAddr <= End,
     (
@@ -449,10 +444,10 @@ moved_immediate_candidate(EA,Imm_index,ImmediateAddr,NewDest):-
 moved_label_class(EA_def2,Imm_index,"loaded immediate loop bound"),
 moved_immediate_candidate(EA_def2,Imm_index,ImmediateAddr,NewDest):-
     cmp_reg_to_reg(EA,Reg1,Reg2),
-    def_used(EA_def1,Reg1,EA,_),
+    reg_def_use.def_used(EA_def1,Reg1,EA,_),
     dest_enlarged_data_section(EA_def1,Reg1,NewDest,Beg,End,OldBeg,OldEnd),
 
-    def_used(EA_def2,Reg2,EA,_),
+    reg_def_use.def_used(EA_def2,Reg2,EA,_),
     (
         binary_type("EXEC"),
         arch.move_reg_imm(EA_def2,Reg2,Immediate,Imm_index), code(EA_def2), Immediate >= 0
@@ -489,16 +484,16 @@ moved_label(EA,Op_index,Dest,NewDest):-
 // If the destination is in the middle of a known symbol
 moved_label_class(EA,Op_index,"middle of symbol"),
 moved_label(EA,Op_index,Dest,Address):-
+    defined_symbol(Address,Size,_,_,_,_,_,_,Name),
+    !function_symbol(Address,Name),
     (
       symbolic_operand(EA,Op_index,Dest,"data");
       got_relative_operand(EA,Op_index,Dest)
     ),
-    !moved_displacement_candidate(EA,Op_index,_,_,_),
-    !moved_immediate_candidate(EA,Op_index,_,_),
-    defined_symbol(Address,Size,_,_,_,_,_,_,Name),
-    !function_symbol(Address,Name),
     Address < Dest,
-    Dest < Address+Size.
+    Dest < Address+Size,
+    !moved_displacement_candidate(EA,Op_index,_,_,_),
+    !moved_immediate_candidate(EA,Op_index,_,_).
 
 // if the destination is an overlapping instruction
 moved_label_class(EA,Op_index,"overlapping instruction"),
@@ -538,3 +533,23 @@ boundary_sym_expr(EA+InstrOffset,Dest):-
     //  At the boundary between two sections
     loaded_section(Dest,_,_),
     loaded_section(_,Dest,_).
+
+/**
+E.g., libc.so (v2.36)
+leaq __elf_set___libc_atexit_element__IO_cleanup__(%rip),%rbx
+leaq __start___libc_IO_vtables(%rip),%rax
+cmpq %rax,%rbx
+*/
+boundary_sym_expr(EA+DisplacementOffset,Dest):-
+    symbolic_operand(EA,Index,Dest,"data"),
+    //  At the boundary between two sections
+    loaded_section(Dest,_,_),
+    loaded_section(Beg,Dest,_),
+    // The symbol is possibly used in loop-bound check instruction (e.g., cmp).
+    reg_def_use.def_used(EA,Reg1,EA_cmp,_),
+    cmp_reg_to_reg(EA_cmp,Reg1,Reg2),
+    reg_def_use.def_used(EA_beg,Reg2,EA_cmp,_),
+    symbolic_operand(EA_beg,_,Dest2,"data"),
+    Dest2 >= Beg,
+    Dest2 < Dest,
+    instruction_displacement_offset(EA,Index,DisplacementOffset,_).

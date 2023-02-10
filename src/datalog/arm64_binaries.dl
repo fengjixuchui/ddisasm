@@ -34,7 +34,6 @@ basic_target(Val):-
 Compute an immediate load performed across two consecutive instructions
 */
 .decl split_load(ea:address, nextea:address, dest:address, type:symbol)
-.output split_load
 
 /** E.g.,
 adrp x0, L1
@@ -182,7 +181,6 @@ the code inference step due to cyclic negation issue.
 Instead, this is for the symbolization step.
 */
 .decl split_load_for_symbolization(ea:address, nextea:address, dest:address, type:symbol)
-.output split_load_for_symbolization
 
 // Direct split load
 split_load_for_symbolization(EA,UsedEA,as(as(Base,number)+Offset,address),Type):-
@@ -217,16 +215,16 @@ object).
 In such case, using :got: for adrp and :got_lo12: for ldr causes runtime
 failure. To avoid the problem, the relocation directives are not used for adrp and ldr.
 */
-symbolic_operand_attribute(EA,1,"GotRef"),
-symbolic_operand_attribute(EA_ldr,1,"GotRef"),
-symbolic_operand_attribute(EA_ldr,1,"Lo12"):-
+symbolic_operand_attribute(EA,1,"GOT"),
+symbolic_operand_attribute(EA_ldr,1,"GOT"),
+symbolic_operand_attribute(EA_ldr,1,"LO12"):-
     split_load_for_symbolization(EA,EA_ldr,Dest,"LDR/STR"),
     !split_load_for_symbolization(EA,EA_ldr,Dest,"ADD"),
     relocation(Dest,_,_,_,_,_,_),
     loaded_section(Beg,End,".got"),
     Beg <= Dest, Dest < End.
 
-symbolic_operand_attribute(EA,1,"Lo12"):-
+symbolic_operand_attribute(EA,1,"LO12"):-
     split_load_for_symbolization(EA0,EA,Dest,"LDR/STR"),
     (
         !relocation(Dest,_,_,_,_,_,_),
@@ -241,7 +239,7 @@ symbolic_operand_attribute(EA,1,"Lo12"):-
         )
     ).
 
-symbolic_operand_attribute(EA,2,"Lo12"):-
+symbolic_operand_attribute(EA,2,"LO12"):-
     split_load_for_symbolization(_,EA,Dest,"ADD"),
     !relocation(as(Dest,address),"GLOB_DAT",_,_,_,_,_).
 
@@ -252,19 +250,6 @@ value_reg(EA,Reg,EA,"NONE",0,Val,1):-
     instruction_get_op(EA,OpIndex,Op1),
     op_indirect(Op1,_,_,_,_,_,DataSize),
     data_word(RefAddr,DataSize/8,Val).
-
-// Not restricted with def_used_for_address since ADRP and ADR are always addresses.
-// TODO: This rule shouldn't be needed once both adrp and adr are marked as pc_relative_addr.
-value_reg(EA,Reg,EA,"NONE",0,Val,1):-
-    instruction(EA,_,_,Operation,Op1,Op2,_,_,_,_),
-    (
-        Operation = "ADRP";
-        Operation = "ADR"
-    ),
-    op_regdirect_contains_reg(Op2,Reg),
-    track_register(Reg),
-    op_immediate(Op1,Offset),
-    Val = Offset.
 
 symbolic_operand_candidate(EA,1,Dest,Type):-
     // ADR <Register> <Immediate>

@@ -115,6 +115,15 @@ symbolic expression pointing to 'address'.
 */
 .decl lsda_type_entry(lsdaTypeTableAddress:address,index:unsigned,address:address)
 .input lsda_type_entry
+
+/**
+Address where a function starts according to the ARM exidx table.
+
+This address does not set the low bit for Thumb functions.
+*/
+.decl arm_exidx_entry(FunctionStart:address)
+.input arm_exidx_entry
+
 /////////////////////////////////////////////////////////////////////////////////
 // output predicates
 
@@ -139,7 +148,6 @@ personality (.cfi_lsda and .cfi_personality respectively).
 /////////////////////////////////////////////////////////////////////////////////
 // Extract information important for disassembly
 .decl fde_addresses(start:address, end:address)
-.output fde_addresses
 
 fde_addresses(Start,End):-
     fde_entry(_,_,_,Start,End,_).
@@ -150,16 +158,16 @@ fde_addresses(Start,End):-
 fde_block_addresses(FdeAddr,Start,EndAddr):-
     fde_entry(FdeAddr,_,_,Start,EndAddr,_),
     refined_block(Start),
-    block_information(_,_,EndAddr).
+    block_information(_,_,_,EndAddr).
 
 fde_block_addresses(FdeAddr,Start,EndBlock):-
     fde_entry(FdeAddr,_,_,Start,EndAddr,_),
     refined_block(Start),
     // this case moves the end address to the end of the last block
-    !block_information(_,_,EndAddr),
+    !block_information(_,_,_,EndAddr),
     after_end(EndAddr,End),
     refined_block_last_instruction(Block,End),
-    block_information(Block,_,EndBlock).
+    block_information(Block,_,_,EndBlock).
 
 .decl lsda_callsite_addresses(Start:address,End:address,LandingPad:address)
 
@@ -453,7 +461,7 @@ cfi_directive(StartFunction,0,0,".cfi_startproc","",0,0,0),
 cfi_directive(Block,BlockSize,LastLocalIndex,".cfi_endproc","",0,0,0):-
     !option("no-cfi-directives"),
     fde_block_addresses(FdeAddr,StartFunction, EndAddr),
-    block_information(Block,BlockSize,EndAddr),
+    block_information(Block,BlockSize,_,EndAddr),
     endproc_local_index(FdeAddr,LastLocalIndex).
 
 
@@ -512,7 +520,7 @@ cfi_directive(Block,Offset,LocalIndex,CfiInsn,"",NOperands,ScaledOp1,ScaledOp2):
     fde_instruction_ref(FdeAddr,Index,LocalIndex,Addr),
     (
         Addr >= EndBlockAddr,
-        block_information(Block,Offset,EndBlockAddr)
+        block_information(Block,Offset,_,EndBlockAddr)
         ;
         Addr < EndBlockAddr,
         code_in_refined_block(Addr,Block),
@@ -528,7 +536,7 @@ cfi_directive(Block,Offset,LocalIndex,".cfi_escape","",Size,as(InstructionBytesA
     fde_instruction_ref(FdeAddr,Index,LocalIndex,Addr),
     (
         Addr >= EndBlockAddr,
-        block_information(Block,Offset,EndBlockAddr)
+        block_information(Block,Offset,_,EndBlockAddr)
         ;
         Addr < EndBlockAddr,
         code_in_refined_block(Addr,Block),
