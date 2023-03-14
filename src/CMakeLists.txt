@@ -37,6 +37,7 @@ set(DATALOG_BASE_SOURCES
     datalog/binary/elf/elf_binaries.dl
     datalog/binary/elf/exceptions.dl
     datalog/binary/elf/relocations.dl
+    datalog/binary/elf/tls.dl
     datalog/binary/pe/pe_binaries.dl
     datalog/binary/pe/exceptions.dl
     datalog/binary/pe/relocations.dl
@@ -72,12 +73,12 @@ if(DDISASM_ARM_32)
       datalog/arch/arm32/float_operations.dl
       datalog/arch/arm32/jump_operations.dl
       datalog/arch/arm32/registers.dl
-      datalog/arm_binaries.dl
-      datalog/arm32_binaries.dl
-      datalog/arm32_ci_heuristics.dl
-      datalog/arm32_jump_tables.dl
-      datalog/arm32_symbolization.dl
-      datalog/arch/arm32/memory_access.dl)
+      datalog/arch/arm32/memory_access.dl
+      datalog/arch/arm_binaries.dl
+      datalog/arch/arm32_binaries.dl
+      datalog/arch/arm32_ci_heuristics.dl
+      datalog/arch/arm32_jump_tables.dl
+      datalog/arch/arm32_symbolization.dl)
 
   set(GENERATED_ARM32_CPP souffle_disasm_arm32.cpp)
   set(GENERATED_ARM32_CPP_PATH ${CMAKE_BINARY_DIR}/src/souffle_disasm_arm32.cpp)
@@ -102,9 +103,9 @@ if(DDISASM_ARM_64)
       datalog/arch/arm64/float_operations.dl
       datalog/arch/arm64/jump_operations.dl
       datalog/arch/arm64/registers.dl
-      datalog/arm_binaries.dl
-      datalog/arm64_binaries.dl
-      datalog/arch/arm64/memory_access.dl)
+      datalog/arch/arm64/memory_access.dl
+      datalog/arch/arm_binaries.dl
+      datalog/arch/arm64_symbolization.dl)
 
   set(GENERATED_ARM64_CPP souffle_disasm_arm64.cpp)
   set(GENERATED_ARM64_CPP_PATH
@@ -131,7 +132,7 @@ if(DDISASM_MIPS_32)
       datalog/arch/mips32/jump_operations.dl
       datalog/arch/mips32/memory_access.dl
       datalog/arch/mips32/registers.dl
-      datalog/mips_binaries.dl)
+      datalog/arch/mips_symbolization.dl)
 
   set(GENERATED_MIPS32_CPP souffle_disasm_mips32.cpp)
 
@@ -160,7 +161,8 @@ if(DDISASM_X86_32)
       datalog/arch/intel/registers_common.dl
       datalog/arch/intel/registers_x86_32.dl
       datalog/arch/intel/arch_x86.dl
-      datalog/arch/intel/memory_access.dl)
+      datalog/arch/intel/memory_access.dl
+      datalog/arch/x86_32_symbolization.dl)
 
   set(GENERATED_X86_32_CPP souffle_disasm_x86_32.cpp)
   set(GENERATED_X86_32_CPP_PATH
@@ -188,7 +190,8 @@ if(DDISASM_X86_64)
       datalog/arch/intel/registers_common.dl
       datalog/arch/intel/registers_x86_64.dl
       datalog/arch/intel/arch_x86.dl
-      datalog/arch/intel/memory_access.dl)
+      datalog/arch/intel/memory_access.dl
+      datalog/arch/x86_64_symbolization.dl)
 
   set(GENERATED_X86_64_CPP souffle_disasm_x86_64.cpp)
   set(GENERATED_X86_64_CPP_PATH
@@ -395,10 +398,28 @@ if(${CMAKE_CXX_COMPILER_ID} STREQUAL GNU)
   target_compile_options(ddisasm_datalog PRIVATE -fno-var-tracking-assignments)
 endif()
 
+# ====== ddisasm_pipeline ===========
+add_library(ddisasm_pipeline STATIC CliDriver.cpp Hints.cpp
+                                    AnalysisPipeline.cpp)
+
+if(SOUFFLE_INCLUDE_DIR)
+  target_include_directories(ddisasm_pipeline SYSTEM
+                             PRIVATE ${SOUFFLE_INCLUDE_DIR})
+endif()
+
+target_compile_definitions(ddisasm_pipeline PRIVATE __EMBEDDED_SOUFFLE__)
+target_compile_definitions(ddisasm_pipeline PRIVATE RAM_DOMAIN_SIZE=64)
+target_compile_options(ddisasm_pipeline PRIVATE ${OPENMP_FLAGS})
+
+if(${CMAKE_CXX_COMPILER_ID} STREQUAL MSVC)
+  set_common_msvc_options(ddisasm_pipeline)
+endif()
+
+target_link_libraries(ddisasm_pipeline PRIVATE gtirb gtirb_decoder)
+
 # ====== ddisasm ===========
 # Build final ddisasm executable
-add_executable(ddisasm Disassembler.cpp Interpreter.cpp Registration.cpp
-                       Main.cpp Functors.cpp)
+add_executable(ddisasm Registration.cpp Main.cpp Functors.cpp)
 
 if(${CMAKE_CXX_COMPILER_ID} STREQUAL GNU)
   target_compile_options(ddisasm PRIVATE -Wno-unused-parameter)
@@ -483,10 +504,13 @@ endif()
 target_link_libraries(
   ddisasm
   PRIVATE ddisasm_datalog
+          ddisasm_pipeline
           gtirb
           gtirb_pprinter
           gtirb_builder
           gtirb_decoder
+          generic_pass
+          disassembly_pass
           ${Boost_LIBRARIES}
           ${EXPERIMENTAL_LIB}
           ${LIBCPP_ABI}
@@ -552,17 +576,18 @@ if(BUILD_FUNINFER)
 
   target_link_libraries(
     funinfer
-    PRIVATE gtirb
+    PRIVATE ddisasm_pipeline
+            gtirb
             gtirb_decoder
+            generic_pass
             scc_pass
             ${CAPSTONE}
             ${Boost_LIBRARIES}
             ${EXPERIMENTAL_LIB}
-            ${LIBCPP_ABI}
-            scc_pass)
+            ${LIBCPP_ABI})
 
   if(${CMAKE_CXX_COMPILER_ID} STREQUAL MSVC)
-    target_link_libraries(funinfer PRIVATE scc_pass no_return_pass
+    target_link_libraries(funinfer PRIVATE no_return_pass
                                            function_inference_pass)
     target_link_options(
       funinfer PRIVATE /WHOLEARCHIVE:no_return_pass$<$<CONFIG:Debug>:d>

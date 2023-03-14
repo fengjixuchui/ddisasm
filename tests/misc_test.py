@@ -76,7 +76,11 @@ class IFuncSymbolsTests(unittest.TestCase):
                 reassemble(
                     "gcc",
                     binary,
-                    extra_flags=["-shared", "-Wl,--version-script=ex.map"],
+                    extra_flags=[
+                        "-shared",
+                        "-Wl,--version-script=ex.map",
+                        "-nostartfiles",
+                    ],
                 )
             )
 
@@ -151,7 +155,16 @@ class AuxDataTests(unittest.TestCase):
                         ".cfi_endproc",
                     ]
                     break
-            assert found
+            self.assertTrue(found)
+
+            # check that we move misaligned directives to function start
+            bar_symbol = list(m.symbols_named("bar"))[0]
+            bar_block = bar_symbol.referent
+            self.assertIsNotNone(bar_block)
+            cfi_at_bar_start = [
+                directive[0] for directive in cfi[gtirb.Offset(bar_block, 0)]
+            ]
+            self.assertIn(".cfi_startproc", cfi_at_bar_start)
 
     @unittest.skipUnless(
         platform.system() == "Linux", "This test is linux only."
@@ -191,8 +204,11 @@ class AuxDataTests(unittest.TestCase):
                 ("souffleOutputs", "csv"),
             ]:
                 for name, relation in m.aux_data[table].data.items():
+                    dirname, filename = name.split(".", 1)
                     _, csv = relation
-                    with open(f"aux/{name}.{ext}", "w") as out:
+                    path = Path("aux", dirname, f"{filename}.{ext}")
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(path, "w") as out:
                         out.write(csv)
 
             # compare the relations directories

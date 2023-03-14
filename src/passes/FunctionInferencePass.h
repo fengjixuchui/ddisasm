@@ -1,6 +1,6 @@
 //===- FunctionInferencePass.h ----------------------------------*- C++ -*-===//
 //
-//  Copyright (C) 2019 GrammaTech, Inc.
+//  Copyright (C) 2019-2023 GrammaTech, Inc.
 //
 //  This code is licensed under the GNU Affero General Public License
 //  as published by the Free Software Foundation, either version 3 of
@@ -23,24 +23,39 @@
 #ifndef FUNCTION_INFERENCE_PASS_H_
 #define FUNCTION_INFERENCE_PASS_H_
 
-#include <souffle/SouffleInterface.h>
-
 #include <gtirb/gtirb.hpp>
-#include <optional>
 
-// Refine function boundaries.
-class FunctionInferencePass
+#include "DatalogAnalysisPass.h"
+
+/**
+Refine function boundaries.
+*/
+class FunctionInferencePass : public DatalogAnalysisPass
 {
 public:
-    void setDebugDir(std::string Path)
+    virtual std::string getName() const override
     {
-        DebugDir = Path;
-    };
+        return "function inference";
+    }
 
-    void computeFunctions(gtirb::Context& C, gtirb::Module& M, unsigned int NThreads);
+    virtual std::string getSourceFilename() const override
+    {
+        return "src/passes/datalog/function_inference.dl";
+    }
 
-private:
-    std::optional<std::string> DebugDir;
-    void updateFunctions(gtirb::Context& C, gtirb::Module& M, souffle::SouffleProgram* P);
+    virtual bool hasLoad(void) override
+    {
+        return true;
+    }
+    virtual bool hasTransform(void) override
+    {
+        return true;
+    }
+
+protected:
+    void loadImpl(AnalysisPassResult& Result, const gtirb::Context& Context,
+                  const gtirb::Module& Module, AnalysisPass* PreviousPass = nullptr) override;
+    void transformImpl(AnalysisPassResult& Result, gtirb::Context& Context,
+                       gtirb::Module& Module) override;
 };
 #endif // FUNCTION_INFERENCE_PASS_H_
