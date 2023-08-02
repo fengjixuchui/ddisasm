@@ -30,7 +30,7 @@ The disassembly has 3 main components:
     - use_def_analysis.dl
     - value_analysis.dl
     - data_access_analysis.dl
-    - pointer_reatribution.dl
+    - pointer_reattribution.dl
 
 In addition there are several modules that consider special cases,
 generic components and tables.
@@ -83,7 +83,10 @@ Convert between input_reg and register with arch.reg_map
 
 // Binary format specific predicates.
 #include "binary/elf/elf_binaries.dl"
+#include "binary/elf/symbolization.dl"
 #include "binary/pe/pe_binaries.dl"
+#include "binary/pe/jump_tables.dl"
+#include "binary/pe/symbolization.dl"
 
 // Architecture specific predicates.
 #include "arch/arch.dl"
@@ -94,6 +97,9 @@ Convert between input_reg and register with arch.reg_map
 #elif defined(ARCH_ARM32)
     #include "arch/arm_binaries.dl"
     #include "arch/arm32_binaries.dl"
+    #include "arch/arm32_code_inference.dl"
+    #include "arch/arm32_jump_tables.dl"
+    #include "arch/arm32_symbolization.dl"
 #elif defined(ARCH_IA32)
     #include "arch/x86_32_symbolization.dl"
 #elif defined(ARCH_AMD64)
@@ -137,6 +143,7 @@ Convert between input_reg and register with arch.reg_map
 // metadata
 .decl entry_point(ea:address)
 .input entry_point
+.output entry_point
 
 .decl endianness(End:symbol) // Either LE or BE
 .input endianness
@@ -207,6 +214,7 @@ binary_isa(ArchName):-
           op1:operand_code,op2:operand_code,op3:operand_code,op4:operand_code,
           immOffset:unsigned,displacementOffset:unsigned)
 .input instruction
+.output instruction
 
 /**
  The instruction at EA has capstone's cs_arm.writeback set.
@@ -254,6 +262,7 @@ Index: The index of the register in bitfield (starts with 0)
 
 .decl op_immediate(code:operand_code,offset:number)
 .input op_immediate
+.output op_immediate
 
 .decl op_special(code:operand_code,type:symbol,value:symbol)
 .input op_special
@@ -261,6 +270,7 @@ Index: The index of the register in bitfield (starts with 0)
 .decl op_indirect(code:operand_code,reg1:input_reg,reg2:input_reg,reg3:input_reg,
         multiplier:number,offset:number,size_value:unsigned)
 .input op_indirect
+.output op_indirect
 
 /**
 The operand identified by Index should be shifted with an immediate.
@@ -502,7 +512,13 @@ conditional_jump(EA):-
     arch.jump(EA),
     arch.conditional(EA,_).
 
-// direct jumps
+/**
+This predicate represents a direct jump from address
+`src` to destination `dest`. It captures only
+direct jump whose destination is known.
+E.g. a direct jump that depends on a relocation will
+not produce a direct_jump term.
+*/
 .decl direct_jump(src:address, dest:address)
 
 direct_jump(EA,as(Dest,address)):-
@@ -511,14 +527,21 @@ direct_jump(EA,as(Dest,address)):-
     arch.jump_operation_op_index(Operation,Index),
     instruction_get_op(EA,Index,Op),
     op_immediate(Op,Dest),
-    !instruction_has_relocation(EA,_).
+    (
+        !instruction_has_relocation(EA,_)
+    ;
+        // Relocations in PEs don't override the destination by default,
+        // only if base_image is changed.
+        binary_format("PE")
+    ).
 
 direct_jump(EA,as(Dest,address)):-
     arch.jump(EA),
     instruction_immediate_offset(EA,_,_,_),
     instruction_has_relocation(EA,Rel),
     relocation(Rel,_,_,_,SymbolIndex,_,_),
-    defined_symbol(Dest,_,_,_,_,_,_,SymbolIndex,_).
+    relocation_active_symbol_table(SymbolTable),
+    defined_symbol(Dest,_,_,_,_,_,SymbolTable,SymbolIndex,_).
 
 direct_jump(EA,EA):-
     instruction_has_loop_prefix(EA).
@@ -528,16 +551,24 @@ direct_jump(EA,EA):-
 impossible_jump_target(0):-
     false.
 
-// Special kinds of indirect jumps
-// PC relative jumps
-.decl pc_relative_jump(src:address, dest:address)
+/** This predicate represents a indirect jump
+from address 'Src' to a destination contained in
+the data pointer located at address 'DataPointer'.
+The location of the pointer can be easily inferred because
+it only depends on the program counter.
+*/
+.decl pc_relative_jump(Src:address, DataPointer:address)
 
-pc_relative_jump(EA,Dest):-
+pc_relative_jump(EA,DataPointer):-
     arch.jump(EA),
-    pc_relative_operand(EA,1,Dest).
+    pc_relative_operand(EA,1,DataPointer).
 
-// jump to the address of a register
-.decl reg_jump(src:address,Reg:register)
+/**
+The instruction at address 'Src' has a jump using
+register 'Reg'. The destination of the jump will
+be the value of the register.
+*/
+.decl reg_jump(Src:address,Reg:register)
 
 reg_jump(EA,Reg):-
     arch.jump(EA),
@@ -547,19 +578,26 @@ reg_jump(EA,Reg):-
     op_regdirect_contains_reg(TargetOp,Reg),
     !arch.pc_reg(Reg).
 
-// indirect jump
-.decl indirect_jump(src:address)
+/**
+The instruction at address 'Src' has an indirect jump.
+I.e. a jump that reads its destination from memory.
+*/
+.decl indirect_jump(Src:address)
 
 indirect_jump(EA):-
     arch.jump(EA),
     instruction_get_operation(EA,Operation),
     arch.jump_operation_op_index(Operation,TargetOpIndex),
     instruction_get_op(EA,TargetOpIndex,TargetOp),
-    op_indirect(TargetOp,_,_,_, _,_,_),
-    !pc_relative_jump(EA,_).
+    op_indirect(TargetOp,_,_,_, _,_,_).
 
-// CALLS
-// direct calls
+/**
+This predicate represents a direct call from address
+'EA' to destination `Dest`. It captures only
+direct calls whose destination is known.
+E.g. a direct call that depends on a relocation will
+not produce a direct_call term.
+*/
 .decl direct_call(EA:address,Dest:address)
 
 direct_call(EA,as(Dest,address)):-
@@ -567,7 +605,13 @@ direct_call(EA,as(Dest,address)):-
     arch.call(EA,Index),
     instruction_get_op(EA,Index,Op),
     op_immediate(Op,Dest),
-    !instruction_has_relocation(EA,_).
+    (
+        !instruction_has_relocation(EA,_)
+    ;
+        // Relocations in PEs don't override the destination by default,
+        // only if base_image is changed.
+        binary_format("PE")
+    ).
 
 direct_call(EA,Dest):-
     !binary_isa("ARM"),
@@ -575,40 +619,43 @@ direct_call(EA,Dest):-
     instruction_immediate_offset(EA,_,_,_),
     instruction_has_relocation(EA,Rel),
     relocation(Rel,_,_,_,SymbolIndex,_,_),
-    defined_symbol(Dest,_,_,_,_,_,_,SymbolIndex,_).
+    relocation_active_symbol_table(SymbolTable),
+    defined_symbol(Dest,_,_,_,_,_,SymbolTable,SymbolIndex,_).
 
-// Syntactically indirect call, but statically resolved direct-call
-// E.g., In MIPS, "jalr t9", where t9 can be statically resolved by
-//       value-analysis, can be considered as direct-call.
-// This needs to be distinguished from direct_call to avoid cyclic dependency
-// in function inference: see basic_function_inference.dl.
-.decl direct_call_resolved(src:address, dest:address)
+/** This predicate represents a indirect call
+from address 'Src' to a destination contained in
+the data pointer located at address 'DataPointer'.
+The location of the pointer can be easily inferred because
+it only depends on the program counter.
+*/
+.decl pc_relative_call(Src:address,DataPointer:address)
 
-direct_call_resolved(0,0):-
-    false.
-
-.decl pc_relative_call(src:address,dest:address)
-
-pc_relative_call(Src,Dest):-
+pc_relative_call(Src,DataPointer):-
     arch.call(Src,_),
-    pc_relative_operand(Src,1,Dest).
+    pc_relative_operand(Src,1,DataPointer).
 
-// for now we do not compute anything about these
-.decl reg_call(src:address,reg:register)
+/**
+ The instruction at address 'Src' has a call using
+ register 'Reg'. The destination of the call will
+ be the value of the register.
+*/
+.decl reg_call(Src:address,Reg:register)
 
 reg_call(EA,Reg):-
     arch.call(EA,TargetOpIndex),
     instruction_get_op(EA,TargetOpIndex,TargetOp),
     op_regdirect_contains_reg(TargetOp,Reg).
 
-.decl indirect_call(src:address)
+/**
+The instruction at address 'Src' has an indirect call.
+I.e. a call that reads its destination from memory.
+*/
+.decl indirect_call(Src:address)
 
 indirect_call(EA):-
     arch.call(EA,TargetOpIndex),
     instruction_get_op(EA,TargetOpIndex,TargetOp),
     op_indirect(TargetOp,_,_,_,_,_,_),
-    !pc_relative_call(EA,_),
-    !direct_call_resolved(EA,_),
     !arch.return(EA).
 
 /**
@@ -735,6 +782,31 @@ defined_symbol(EA,Size,Type,Scope,Visibility,SectIndex,OriginTable,TableIndex,Na
     // Avoid FILE symbols.
     Type != "FILE".
 
+/**
+The name of symbol table to use when looking up symbols from relocations
+
+Although it'd be better to check what symbol table is referenced by the
+relocation section's sh_link attribute, LIEF (as of 0.13.0) does not expose
+this metadata in the LIEF::ELF::Relocation object. LIEF actually uses a similar
+strategy to this, using dynsym if it exists, and otherwise symtab - rather than
+using the sh_link metadata.
+
+This strategy will fail for binaries built with --emit-relocs, since they can
+have relocations referencing both symbol tables.
+*/
+.decl relocation_active_symbol_table(Name:symbol)
+
+relocation_active_symbol_table(".dynsym"):-
+    binary_format("ELF"),
+    !binary_type("REL").
+
+relocation_active_symbol_table(".symtab"):-
+    binary_format("ELF"),
+    binary_type("REL").
+
+relocation_active_symbol_table(""):-
+    binary_format("PE").
+
 ////////////////////////////////////////////////////////////////////////////////////////
 
 .decl loaded_section(Beg:address,End:address,Name:symbol)
@@ -800,6 +872,11 @@ data_segment(Begin,End):-
 
 ////////////////////////////////////////////////////////////////////////////
 // detect references  to libraries (calls to plt)
+
+/**
+The basic block 'Block' implements a PLT thunk
+that refers to function 'Function'.
+*/
 .decl plt_block(block:address,function:symbol)
 .output plt_block
 

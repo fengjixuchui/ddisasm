@@ -47,7 +47,7 @@ default:
   # Configure GTIRB APT repository.
   - DIST_NAME="$(lsb_release -sc)"
   - wget -O - https://download.grammatech.com/gtirb/files/apt-repo/conf/apt.gpg.key | apt-key add -
-  - COMPONENT=$([[ $CI_COMMIT_REF_NAME =~ release-.* ]] && echo "stable" || echo "unstable")
+  - COMPONENT=$([[ $CI_COMMIT_REF_NAME =~ ^release-.* ]] && echo "stable" || echo "unstable")
   - echo "deb https://download.grammatech.com/gtirb/files/apt-repo $DIST_NAME $COMPONENT" | tee -a /etc/apt/sources.list.d/gtirb.list
   - apt-get update -y
 
@@ -78,6 +78,14 @@ default:
   - ccache --zero-stats
   - ccache --show-stats
 
+.setup-conan-linux:
+  - export CONAN_USER_HOME=$(pwd)
+  - pip3 install --upgrade conan~=$CONAN_VERSION
+  - conan profile new default --detect
+  - conan profile update settings.compiler.libcxx=libstdc++11 default
+  - conan remote add gitlab ${CI_API_V4_URL}/packages/conan
+  - conan user ci_user -r gitlab -p
+
 .build-ci-image: &build-ci-image
   stage: build-images
   image:
@@ -99,7 +107,7 @@ default:
       fi
     - >-
       /kaniko/executor
-      --snapshotMode=redo
+      --snapshot-mode=redo
       --cache=true
       --cache-repo=${DOCKER_REGISTRY}/${CI_PROJECT_PATH}/${IMAGE_NAME}/cache
       --context=$CI_PROJECT_DIR
@@ -126,6 +134,13 @@ build-ci-image-static:
   variables:
     DOCKERFILE_PATH: .ci/Dockerfile.static
     IMAGE_NAME: static
+    UBUNTU_CODENAME: "" # Don't push to DockerHub
+
+build-ci-image-manylinux2010:
+  <<: *build-ci-image
+  variables:
+    DOCKERFILE_PATH: .ci/Dockerfile.manylinux2010
+    IMAGE_NAME: manylinux2010_x86_64
     UBUNTU_CODENAME: "" # Don't push to DockerHub
 
 check-format:
@@ -166,6 +181,7 @@ check-format:
 .conan-linux-build-template: &conan-linux-build-template
   stage: build
   needs: [check-format]
+  tags: [bigmem]
   artifacts:
     paths:
       - .conan
@@ -177,16 +193,12 @@ check-format:
     *run-only-main
   script:
     - !reference [.setup-ccache]
-    - export CONAN_USER_HOME=$(pwd)
-    - pip3 install --upgrade conan~=$CONAN_VERSION
-    - conan profile new default --detect
-    - conan profile update settings.compiler.libcxx=libstdc++11 default
-    - conan remote add gitlab ${CI_API_V4_URL}/packages/conan
-    - conan user ci_user -r gitlab -p
+    - !reference [.setup-conan-linux]
     # Install gtirb python wheel
-    - python3 -m pip install pip --upgrade && python3 -m pip install gtirb --extra-index-url=$EXTRA_INDEX_URL --pre
+    - python3 -m pip install pip --upgrade
+    - python3 -m pip install -r requirements-dev.txt --extra-index-url=$EXTRA_INDEX_URL --pre
     # Run build script
-    - CMAKE_CXX_COMPILER_LAUNCHER=ccache PYTHONPATH="$(pwd):$PYTHONPATH" python3 .ci/run_conan.py build -s build_type=Release
+    - CONAN_CPU_COUNT=8 CMAKE_CXX_COMPILER_LAUNCHER=ccache PYTHONPATH="$(pwd):$PYTHONPATH" python3 .ci/run_conan.py build -s build_type=Release
 
 build-conan-gcc9-release:
   image: $DOCKER_REGISTRY/rewriting/ddisasm/conan-ubuntu20:$IMAGE_TAG
@@ -198,27 +210,132 @@ conan-gcc9-release-publish:
   dependencies: [build-conan-gcc9-release]
   <<: *conan-linux-publish-template
 
+python-manylinux-2010-release:
+  stage: build
+  needs: [check-format]
+  image: $DOCKER_REGISTRY/rewriting/ddisasm/manylinux2010_x86_64:$IMAGE_TAG
+  artifacts:
+    paths:
+      - _build/wheelhouse/*.whl
+    # Set a short expiry time - only needed until it is published by a later job.
+    expire_in: 8 hours
+  cache:
+    paths: [ccache]
+  rules:
+   *run-only-main
+  script:
+    - !reference [.setup-ccache]
+    - !reference [.setup-conan-linux]
+    - RELEASE_VERSION=$([[ $CI_COMMIT_REF_NAME =~ ^release-.* ]] && echo "ON" || echo "OFF")
+    - mkdir _build
+    - cd _build
+    - conan install ..  '--build=*' -o gtirb-pprinter:run_tests=False
+    - cmake .. -DENABLE_CONAN=ON -DDDISASM_BUILD_PYTHON_PACKAGE=ON -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_BUILD_TYPE=Release -DDDISASM_RELEASE_VERSION=$RELEASE_VERSION
+    - cmake --build . --target=python-wheel --parallel=$(nproc)
+    - auditwheel repair python/dist/*.whl
+    - ccache --show-stats
+
+python-manylinux-2010-test:
+  image: python:3.9
+  stage: package-tests
+  needs:
+    - python-manylinux-2010-release
+  rules:
+   *run-only-main
+  script:
+    - pip3 install _build/wheelhouse/ddisasm*.whl --extra-index-url=$EXTRA_INDEX_URL
+    - ddisasm --version
+
+python-manylinux-2010-publish-internal:
+  image: python:3.9
+  stage: deploy
+  needs:
+    - python-manylinux-2010-release
+  rules:
+    *publish-rules
+  script:
+    - cd _build/wheelhouse/
+    - pip3 install twine wheel setuptools --upgrade
+    - wget https://git.grammatech.com/research/templates/python-module/raw/master/.pypirc
+    - sed "s/password = <access token>/password = $GL_PKG_API_TOKEN/" .pypirc > ~/.pypirc
+    - pip3 install ddisasm-*.whl --extra-index-url=$EXTRA_INDEX_URL
+    - NEW_VERSION=$(python3 -c "import ddisasm; print(ddisasm.__version__)")
+    - if [[ "$NEW_VERSION" =~ \.dev[[:digit:]]*(\+.*)?$ && "$CI_COMMIT_REF_NAME" =~ ^release-.* ]]; then exit 1; fi
+    - if [[ "$CI_COMMIT_BRANCH" == "$CI_DEFAULT_BRANCH" ]]; then
+        if [[ ! "$NEW_VERSION" =~ \.dev[[:digit:]]*$ ]]; then
+          echo "[ERROR] Only .dev versions can be uploaded from the master branch.";
+          exit 1;
+        fi;
+        if pip3 install --extra-index-url=$EXTRA_INDEX_URL "ddisasm>$NEW_VERSION" 2>/dev/null; then
+          echo "[ERROR] The package version being published on master should always be >= the version in the repository.";
+          exit 1;
+        fi;
+        wget https://git.grammatech.com/research/templates/python-module/raw/master/delete_remote_packages.py;
+        python3 delete_remote_packages.py $GL_PKG_API_TOKEN ddisasm-*.whl;
+      fi
+    - twine check ddisasm-*.whl
+    - twine upload --verbose --repository repypi ddisasm-*.whl
+
+python-manylinux-2010-publish-external:
+  stage: deploy
+  image: python:3.9-slim
+  needs:
+    - python-manylinux-2010-release
+  script:
+    - cd _build/wheelhouse/
+    - pip3 install twine ddisasm-*.whl
+    - VERSION=$(python3 -c "import ddisasm; print(ddisasm.__version__)")
+    # Do not publish .dev versions on the public pypi
+    - if [[ "$VERSION" =~ \.dev[[:digit:]]*.*$ ]]; then exit 1; fi
+    - python3 -m twine upload --verbose ddisasm-*.whl -u __token__ -p $PYPI_API_KEY
+  rules:
+    - if: '$CI_COMMIT_REF_NAME =~ /^release-.*/'
+
 .conan-windows-template: &conan-windows-template
   stage: build
   tags: [ddisasm-windows]
   artifacts:
     paths:
-      - .conan
+      - conan_home.tar.gz
+      - conan_aux.tar.gz
     # Set a short expiry time - only needed until it is published by a later job.
     expire_in: 8 hours
   script:
     - systeminfo
     - pip3 install --upgrade conan~=$CONAN_VERSION
-    # Build conan packages in a directory that we can publish as an artifact.
+    # Build conan packages in a known location
     - export CONAN_USER_HOME=$(cygpath -w $(pwd))
     # Set up user and remote
     - conan remote add gitlab ${CI_API_V4_URL}/packages/conan
     - conan user ci_user -r gitlab -p
     # Install packages needed for the tests
-    - python -m pip install pip --upgrade && python -m pip install gtirb --extra-index-url=$EXTRA_INDEX_URL --pre
+    - python -m pip install pip --upgrade
+    - python -m pip install gtirb --extra-index-url=$EXTRA_INDEX_URL --pre
     # Run build script
     - export PYTHONPATH="$PYTHONPATH;$(cygpath -w $(pwd))"
-    - python .ci/run_conan.py build -s build_type=$BUILD_TYPE
+    - python .ci/run_conan.py build $CONAN_OPTIONS -s build_type=$BUILD_TYPE
+    # Create archives of both .conan HOME directory and C:\conan, where conan
+    # begins to put files if paths get too long.
+    - tar -cvzf conan_home.tar.gz .conan/
+    - tar -C $(cygpath -u C:\\) -cvzf conan_aux.tar.gz .conan
+
+.conan-windows-test-template: &conan-windows-test-template
+  stage: test-and-tag
+  tags: [ddisasm-windows]
+  script:
+    - tar -xf conan_home.tar.gz
+    - tar -xf conan_aux.tar.gz -C $(cygpath -u C:\\)
+    # Install packages needed for the tests
+    - python -m pip install -r requirements-dev.txt --extra-index-url=$EXTRA_INDEX_URL --pre
+    - export PYTHONPATH="$PYTHONPATH;$(cygpath -w $(pwd))"
+    - export CONAN_USER_HOME=$(cygpath -w $(pwd))
+    - export CONAN_REF=$(python -c 'print(__import__("conanfile").Properties().conan_recipe, end="")')
+    # Change directory to the conan build directory
+    - cd $(find . -type d -path '*.conan/data/ddisasm/dev/rewriting+ddisasm/*/build/*' -print -quit)
+    # Create virtualrunenv script (activate_run.bat)
+    - conan install ${CONAN_REF} -g virtualrunenv
+    # Run the tests
+    - cmd.exe /C "activate_run.bat && ddisasm --version && C:\\VS\\VC\\Auxiliary\\Build\\vcvarsall.bat ${ARCH} && ctest -V"
 
 .conan-windows-publish-template: &conan-windows-publish-template
   stage: deploy
@@ -228,6 +345,8 @@ conan-gcc9-release-publish:
   script:
     - export CONAN_USER_HOME=$(cygpath -w $(pwd))
     - pip3 install --upgrade conan~=$CONAN_VERSION
+    - tar -xf conan_home.tar.gz
+    - tar -xf conan_aux.tar.gz -C $(cygpath -u C:\\)
     - export PYTHONPATH="$PYTHONPATH;$(cygpath -w $(pwd))"
     - python .ci/run_conan.py upload
 
@@ -240,43 +359,56 @@ conan-gcc9-release-publish:
       - ddisasm*.zip
   script:
     # Initialize
-      # Setting CI_PROJECT_DIR to the PWD because GitLab Runner sets a relative path for CI_PROJECT_DIR with VirtualBox runners.
-    - export CI_PROJECT_DIR=`cygpath -w $(pwd)`
-    - export CONAN_USER_HOME="${CI_PROJECT_DIR}"
-    - export PYTHONPATH="${PYTHONPATH};${CI_PROJECT_DIR}"
+    - tar -xf conan_home.tar.gz
+    - tar -xf conan_aux.tar.gz -C $(cygpath -u C:\\)
+    # Setting CI_PROJECT_DIR to the PWD because GitLab Runner sets a relative path for CI_PROJECT_DIR with VirtualBox runners.
+    - export CI_PROJECT_DIR=$(pwd)
+    - export CONAN_USER_HOME=$(cygpath -w $(pwd))
+    - export PYTHONPATH="${PYTHONPATH};$(cygpath -w $(pwd))"
     # Prep
     - python -m pip install --upgrade conan~=$CONAN_VERSION
     # Install
-    - python .ci/run_conan.py install --install-folder=./packages
-    # Package
-    - export PKG_NAME=`conan inspect . --raw name`
-    - export PKG_VERSION=`conan inspect . --raw version`
-    - export PKG_ARCH=`uname -m`
-    - export PKG_FILENAME="${CI_PROJECT_DIR}\\${PKG_NAME}-${PKG_VERSION}.win10.${PKG_ARCH}.zip"
-    - export PKG_FILENAME_LITE="${CI_PROJECT_DIR}\\${PKG_NAME}-lite-${PKG_VERSION}.win10.${PKG_ARCH}.zip"
+    - python .ci/run_conan.py install --install-folder=./conan-packages
+    # Merge Package Files
+    - export CONAN_PACKAGES="${CI_PROJECT_DIR}/conan-packages/*"
+    - export WINDOWS_PACKAGE_NAME=`conan inspect . --raw name`
+    - export WINDOWS_PACKAGE_VERSION=`conan inspect . --raw version`
+    - export WINDOWS_PACKAGE_ARCH=`uname -m`
+    - export WINDOWS_PACKAGE_DIR="${CI_PROJECT_DIR}/windows-package"
+    - export WINDOWS_PACKAGE="${WINDOWS_PACKAGE_DIR}/${WINDOWS_PACKAGE_NAME}"
+    - mkdir -p $WINDOWS_PACKAGE
     - |+
-      for PKG_DIR in ./packages/*/; do
-        PKG_DIR_NAME=`basename $PKG_DIR`
-        for PKG_SUBDIR in ./packages/$PKG_DIR_NAME/*/; do
-          PKG_SUBDIR_NAME=`basename $PKG_SUBDIR`
-          PKG_FILE_DEST="./package/${PKG_NAME}/${PKG_SUBDIR_NAME}"
-          [ -d $PKG_FILE_DEST ] || mkdir -p $PKG_FILE_DEST
-          if [ $PKG_SUBDIR_NAME != 'licenses' ]; then
-            cp -r $PKG_SUBDIR/* $PKG_FILE_DEST
-          else
-            for PKG_LICENSE in $PKG_SUBDIR/*; do
-              cp $PKG_LICENSE $PKG_FILE_DEST/LICENSE-$PKG_DIR_NAME
-            done
+      for CONAN_PACKAGE in $CONAN_PACKAGES; do
+        if [ -d $CONAN_PACKAGE ]; then
+          rsync -a --exclude licenses $CONAN_PACKAGE/ $WINDOWS_PACKAGE/
+          if [ -d $CONAN_PACKAGE/licenses ]; then
+            CONAN_PACKAGE_NAME=`basename $CONAN_PACKAGE`
+            mkdir -p ${WINDOWS_PACKAGE}/licenses/${CONAN_PACKAGE_NAME}
+            rsync -a $CONAN_PACKAGE/licenses/ ${WINDOWS_PACKAGE}/licenses/${CONAN_PACKAGE_NAME}/
           fi
-        done
+        fi
       done
-    - cd ./package
-    - zip -r $PKG_FILENAME ./
-    - zip -r $PKG_FILENAME_LITE ./ -x "${PKG_NAME}/include/*"
+    - cd $WINDOWS_PACKAGE_DIR
+    # Runtime Package
+    - export WINDOWS_RUNTIME_PACKAGE_ARCHIVE="${CI_PROJECT_DIR}/${WINDOWS_PACKAGE_NAME}-${WINDOWS_PACKAGE_VERSION}.win10.${WINDOWS_PACKAGE_ARCH}.zip"
+    - export WINDOWS_RUNTIME_PACKAGE_MANIFEST=(
+        "ddisasm/bin/capstone.dll"
+        "ddisasm/bin/ddisasm.exe"
+        "ddisasm/bin/gtirb.dll"
+        "ddisasm/bin/gtirb_layout.dll"
+        "ddisasm/bin/gtirb-layout.exe"
+        "ddisasm/bin/gtirb_pprinter.dll"
+        "ddisasm/bin/gtirb-pprinter.exe"
+        "ddisasm/licenses/capstone/*"
+        "ddisasm/licenses/gtirb/*"
+        "ddisasm/licenses/gtirb-pprinter/*"
+      )
+    - zip -r $WINDOWS_RUNTIME_PACKAGE_ARCHIVE ${WINDOWS_RUNTIME_PACKAGE_MANIFEST[@]}
 
 conan-windows-debug:
   variables:
     BUILD_TYPE: Debug
+    CONAN_OPTIONS: -o run_tests=False
   rules:
     *run-only-main
   <<: *conan-windows-template
@@ -292,7 +424,22 @@ conan-windows-debug-publish:
 conan-windows-release:
   variables:
     BUILD_TYPE: Release
+    CONAN_OPTIONS: -o run_tests=False
   <<: *conan-windows-template
+
+conan-windows-release-test-x86:
+  needs: [conan-windows-release]
+  dependencies: [conan-windows-release]
+  variables:
+    ARCH: x86
+  <<: *conan-windows-test-template
+
+conan-windows-release-test-x64:
+  needs: [conan-windows-release]
+  dependencies: [conan-windows-release]
+  variables:
+    ARCH: x64
+  <<: *conan-windows-test-template
 
 conan-windows-release-publish:
   needs:
@@ -313,6 +460,7 @@ conan-windows-release-package:
       - build
   cache:
     paths: [ccache]
+  tags: [bigmem]
   script:
     - !reference [.setup-apt]
     - !reference [.install-deps]
@@ -321,8 +469,8 @@ conan-windows-release-package:
     # Build ddisasm
     - mkdir build
     - cd build
-    - cmake -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER=${CXX_COMPILER} -DCMAKE_BUILD_TYPE=$BUILD_TYPE -DCPACK_DEBIAN_PACKAGE_RELEASE="$(lsb_release -sc)" -DBUILD_FUNINFER=1 -DDDISASM_STRIP_DEBUG_SYMBOLS=ON ..
-    - make
+    - cmake -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER=${CXX_COMPILER} -DCMAKE_BUILD_TYPE=$BUILD_TYPE -DCPACK_DEBIAN_PACKAGE_RELEASE="$(lsb_release -sc)" -DBUILD_FUNINFER=1 -DDDISASM_STRIP_DEBUG_SYMBOLS=ON -DDDISASM_GENERATE_MANY=ON ${CMAKE_OPTIONS} ..
+    - make -j8
     # Report ccache stats.
     - ccache --show-stats
 
@@ -331,7 +479,8 @@ conan-windows-release-package:
     - !reference [.setup-apt]
     - !reference [.install-deps]
     # Install gtirb python API
-    - python3 -m pip install pip --upgrade && python3 -m pip install gtirb --extra-index-url=$EXTRA_INDEX_URL --pre
+    - python3 -m pip install pip --upgrade
+    - python3 -m pip install -r requirements-dev.txt --extra-index-url=$EXTRA_INDEX_URL --pre
     # Run tests
     - cd build && PATH=$(pwd)/bin:$PATH ctest -V
 
@@ -364,6 +513,18 @@ build-ubuntu20-clang-debug:
     BUILD_TYPE: 'Debug'
   <<: *build
 
+build-ubuntu20-clang-profiler:
+  stage: build
+  image: $DOCKER_REGISTRY/rewriting/ddisasm/ubuntu20:$IMAGE_TAG
+  variables:
+    OS: 'ubuntu20'
+    CXX_COMPILER: 'clang++'
+    BUILD_TYPE: 'RelWithDebInfo'
+    CMAKE_OPTIONS: -DDDISASM_SOUFFLE_PROFILING=ON
+  rules:
+    *run-only-main
+  <<: *build
+
 build-static:
   stage: build
   image: $DOCKER_REGISTRY/rewriting/ddisasm/static:$IMAGE_TAG
@@ -371,6 +532,7 @@ build-static:
     *run-only-main
   cache:
     paths: [ccache]
+  tags: [bigmem]
   script:
     # install capstone
     - !reference [.setup-apt]
@@ -378,30 +540,32 @@ build-static:
     # setup ccache
     - !reference [.setup-ccache]
     # build GTIRB
-    - GTIRB_BRANCH=$([[ $CI_COMMIT_REF_NAME =~ release-.* ]] && echo "release-$GTIRB_VERSION" || echo "master")
+    - GTIRB_BRANCH=$([[ $CI_COMMIT_REF_NAME =~ ^release-.* ]] && echo "release-$GTIRB_VERSION" || echo "master")
     - git clone https://git.grammatech.com/rewriting/gtirb.git -b $GTIRB_BRANCH
     - mkdir gtirb/build
     - cd gtirb/build
     - cmake ../ -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_BUILD_TYPE=RelWithDebInfo -DGTIRB_BUILD_SHARED_LIBS=OFF
-    - make -j
+    - make
     - cd python; python3 setup.py develop; cd ..
     - cd ../..
     # build gtirb-pprinter
-    - GTIRB_PPRINTER_BRANCH=$([[ $CI_COMMIT_REF_NAME =~ release-.* ]] && echo "release-$GTIRB_PPRINTER_VERSION" || echo "master")
+    - GTIRB_PPRINTER_BRANCH=$([[ $CI_COMMIT_REF_NAME =~ ^release-.* ]] && echo "release-$GTIRB_PPRINTER_VERSION" || echo "master")
     - git clone https://git.grammatech.com/rewriting/gtirb-pprinter.git -b $GTIRB_PPRINTER_BRANCH
     - mkdir gtirb-pprinter/build
     - cd gtirb-pprinter/build
     - cmake ../ -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_BUILD_TYPE=RelWithDebInfo -DGTIRB_PPRINTER_BUILD_SHARED_LIBS=OFF
-    - make -j
+    - make
     - cd ../..
     # build ddisasm
     - mkdir build
     - cd build
-    - cmake ../ -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDDISASM_BUILD_SHARED_LIBS=OFF
-    - make
+    - cmake ../ -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDDISASM_BUILD_SHARED_LIBS=OFF -DDDISASM_GENERATE_MANY=ON
+    - make -j8
     # Report ccache stats.
     - ccache --show-stats
     # Run the regression tests.
+    - python3 -m pip install pip --upgrade
+    - python3 -m pip install -r ../requirements-dev.txt --extra-index-url=$EXTRA_INDEX_URL --pre
     - PATH=$(pwd)/../gtirb-pprinter/build/bin:$(pwd)/bin:$PATH ctest -V
 
 
@@ -446,6 +610,7 @@ static-drivers:
       - build/bin
   cache:
     paths: [ccache]
+  tags: [bigmem]
   rules:
     *run-only-main
   script:
@@ -455,27 +620,29 @@ static-drivers:
     # set up ccache
     - !reference [.setup-ccache]
     # build GTIRB
-    - GTIRB_BRANCH=$([[ $CI_COMMIT_REF_NAME =~ release-.* ]] && echo "release-$GTIRB_VERSION" || echo "master")
+    - GTIRB_BRANCH=$([[ $CI_COMMIT_REF_NAME =~ ^release-.* ]] && echo "release-$GTIRB_VERSION" || echo "master")
     - git clone https://git.grammatech.com/rewriting/gtirb.git -b $GTIRB_BRANCH
     - cd gtirb
     - mkdir build && cd build
     - cmake ../ -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_BUILD_TYPE=Debug -DGTIRB_BUILD_SHARED_LIBS=OFF
-    - make -j
+    - make
     - cd python; python3 setup.py develop; cd ..
     - cd ../..
     # build gtirb-pprinter
-    - GTIRB_PPRINTER_BRANCH=$([[ $CI_COMMIT_REF_NAME =~ release-.* ]] && echo "release-$GTIRB_PPRINTER_VERSION" || echo "master")
+    - GTIRB_PPRINTER_BRANCH=$([[ $CI_COMMIT_REF_NAME =~ ^release-.* ]] && echo "release-$GTIRB_PPRINTER_VERSION" || echo "master")
     - git clone https://git.grammatech.com/rewriting/gtirb-pprinter.git -b $GTIRB_PPRINTER_BRANCH
     - cd gtirb-pprinter
     - mkdir build && cd build
     - cmake ../ -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_BUILD_TYPE=Debug -DGTIRB_PPRINTER_BUILD_SHARED_LIBS=OFF
-    - make -j
+    - make
     - cd ../..
     # build ddisasm
     - mkdir build && cd build
-    - cmake ../ -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_BUILD_TYPE=Debug -DDDISASM_STATIC_DRIVERS=ON
-    - make
+    - cmake ../ -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_BUILD_TYPE=Debug -DDDISASM_STATIC_DRIVERS=ON -DDDISASM_GENERATE_MANY=ON
+    - make -j8
     # Run the regression tests.
+    - python3 -m pip install pip --upgrade
+    - python3 -m pip install -r ../requirements-dev.txt --extra-index-url=$EXTRA_INDEX_URL --pre
     - PATH=$(pwd)/../gtirb-pprinter/build/bin:$(pwd)/bin:$PATH ctest -V
     # For verification purposes, print ldd of the driver here.
     - ldd bin/ddisasm
@@ -514,6 +681,16 @@ run-ubuntu20-clang-debug:
   script:
   <<: *test-and-tag
 
+run-ubuntu20-clang-profiler:
+  stage: test-and-tag
+  image: $DOCKER_REGISTRY/rewriting/ddisasm/ubuntu20:$IMAGE_TAG
+  needs: ['build-ubuntu20-clang-profiler']
+  variables:
+    OS: 'ubuntu20'
+    BUILD_TYPE: 'RelWithDebInfo'
+  script:
+  <<: *test-and-tag
+
 test-make-install:
   stage: test-and-tag
   image: $DOCKER_REGISTRY/rewriting/ddisasm/ubuntu20:$IMAGE_TAG
@@ -528,7 +705,8 @@ test-make-install:
     - !reference [.setup-apt]
     - !reference [.install-deps]
     # Install gtirb python API
-    - python3 -m pip install pip --upgrade && python3 -m pip install gtirb --extra-index-url=$EXTRA_INDEX_URL --pre
+    - python3 -m pip install pip --upgrade
+    - python3 -m pip install -r requirements-dev.txt --extra-index-url=$EXTRA_INDEX_URL --pre
     - cd build && make -t && make install
     - cd .. && PYTHONPATH=$PYTHONPATH:$(pwd)/tests python3 -m unittest end2end_test.TestExamples.test_1
 
@@ -641,15 +819,15 @@ docker-image-vars:
     - if: '$CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH'
     - if: '$CI_COMMIT_REF_NAME =~ /^release-.*/'
   script:
-    - GTIRB_BRANCH=$([[ $CI_COMMIT_REF_NAME =~ release-.* ]] && echo "release-$GTIRB_VERSION" || echo "master")
-    - GTIRB_PPRINTER_BRANCH=$([[ $CI_COMMIT_REF_NAME =~ release-.* ]] && echo "release-$GTIRB_PPRINTER_VERSION" || echo "master")
+    - GTIRB_BRANCH=$([[ $CI_COMMIT_REF_NAME =~ ^release-.* ]] && echo "release-$GTIRB_VERSION" || echo "master")
+    - GTIRB_PPRINTER_BRANCH=$([[ $CI_COMMIT_REF_NAME =~ ^release-.* ]] && echo "release-$GTIRB_PPRINTER_VERSION" || echo "master")
     - echo "VERSION=$(awk '{s=(NR==1?s:s".")$2}END{print s}' version.txt)" >> .env
     - echo "GTIRB_BRANCH=$GTIRB_BRANCH" >> .env
     - echo "GTIRB_PPRINTER_BRANCH=$GTIRB_PPRINTER_BRANCH" >> .env
     - echo "GTIRB_COMMIT=$(git ls-remote https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/rewriting/gtirb | grep "refs/heads/$GTIRB_BRANCH\$" | awk '{print $1}')" >> .env
     - echo "GTIRB_PPRINTER_COMMIT=$(git ls-remote https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/rewriting/gtirb-pprinter | grep "refs/heads/$GTIRB_PPRINTER_BRANCH\$" | awk '{print $1}')" >> .env
     - >-
-      if [[ $CI_COMMIT_REF_NAME =~ release-.* ]]; then
+      if [[ $CI_COMMIT_REF_NAME =~ ^release-.* ]]; then
         echo "DOCKER_IMAGE_BASE_TAG=latest" >> .env
         echo "DOCKER_LOCAL_VERSION_DEST=--destination=${DOCKER_REGISTRY}/${CI_PROJECT_PATH}:$VERSION" >> .env
         echo "DOCKER_HUB_VERSION_DEST=--destination=grammatech/ddisasm:$VERSION" >> .env
@@ -687,7 +865,7 @@ docker-image:
     # Push to Docker Hub
     - >-
       /kaniko/executor
-      --snapshotMode=redo
+      --snapshot-mode=redo
       --cache=true
       --cache-repo=${DOCKER_REGISTRY}/${CI_PROJECT_PATH}/ddisasm/cache
       --context=$CI_PROJECT_DIR

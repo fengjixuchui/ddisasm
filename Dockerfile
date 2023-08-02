@@ -21,7 +21,7 @@ RUN apt-get -y update \
       sqlite3 \
       zlib1g-dev
 
-RUN git clone -b 2.3 https://github.com/souffle-lang/souffle && \
+RUN git clone -b 2.4 https://github.com/souffle-lang/souffle && \
     cd souffle && \
     cmake . -Bbuild -DCMAKE_BUILD_TYPE=Release -DSOUFFLE_USE_CURSES=0 -DSOUFFLE_USE_SQLITE=0 -DSOUFFLE_DOMAIN_64BIT=1 && \
     cd build && \
@@ -40,7 +40,7 @@ RUN apt-get -y update \
       git \
       python3
 
-RUN git clone -b 0.12.3 --depth 1 https://github.com/lief-project/LIEF.git /usr/local/src/LIEF
+RUN git clone -b 0.13.0 --depth 1 https://github.com/lief-project/LIEF.git /usr/local/src/LIEF
 RUN cmake -DLIEF_PYTHON_API=OFF -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF /usr/local/src/LIEF -B/usr/local/src/LIEF/build
 RUN cmake --build /usr/local/src/LIEF/build -j4 --target all install
 
@@ -56,7 +56,7 @@ RUN apt-get -y update \
       cmake \
       git
 
-RUN git clone https://git.zephyr-software.com/opensrc/libehp.git /usr/local/src/libehp
+RUN git clone https://github.com/GrammaTech/libehp.git /usr/local/src/libehp
 RUN git -C /usr/local/src/libehp reset --hard 5e41e26b88d415f3c7d3eb47f9f0d781cc519459
 RUN cmake -DCMAKE_CXX_COMPILER=g++ -DCMAKE_BUILD_TYPE=Release -DEHP_BUILD_SHARED_LIBS=OFF /usr/local/src/libehp -B/usr/local/src/libehp/build
 RUN cmake --build /usr/local/src/libehp/build -j4 --target all install
@@ -166,9 +166,14 @@ COPY --from=gtirb-pprinter /usr/local/include /usr/local/include
 COPY .git/ /usr/local/src/ddisasm/.git
 COPY doc/ /usr/local/src/ddisasm/doc/
 COPY src/ /usr/local/src/ddisasm/src/
-COPY README.md CMakeLists.txt CMakeLists.googletest version.txt /usr/local/src/ddisasm/
-RUN cmake -DCMAKE_BUILD_TYPE=Release /usr/local/src/ddisasm -B/usr/local/src/ddisasm/build
-RUN cmake --build /usr/local/src/ddisasm/build -j4 --target all install
+COPY CMakeLists.txt \
+     CMakeLists.googletest \
+     LICENSE.txt \
+     README.md \
+     version.txt \
+     /usr/local/src/ddisasm/
+RUN cmake -DCMAKE_BUILD_TYPE=Release -DDDISASM_GENERATE_MANY=ON /usr/local/src/ddisasm -B/usr/local/src/ddisasm/build
+RUN cmake --build /usr/local/src/ddisasm/build -j$(nproc) --target all install
 
 # ------------------------------------------------------------------------------
 # Final image

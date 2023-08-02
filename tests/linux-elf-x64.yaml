@@ -23,7 +23,15 @@ default: &default
     strip_exe: "strip"
     strip: false
     skip: false
-    check_cfg: true
+    cfg_checks:
+      - unreachable
+      - unresolved_branch
+      - cfg_empty
+      - main_is_code
+      - decode_mode_matches_arch
+      - outgoing_edges
+      - edge_instruction_group
+      - cfg_completeness
 
 cpp: &default-cpp
   <<: *default
@@ -31,18 +39,34 @@ cpp: &default-cpp
     compiler: "g++"
     flags: ["-no-pie", "-nostartfiles"]
     skip: false
-
   test:
     <<: *default-test
-    check_cfg: false
+    # some code is reachable only through exceptions
+    # virtual call are hard to resolve
+    cfg_checks:
+      #- unreachable
+      #- unresolved_branch
+      - cfg_empty
+      - main_is_code
+      - decode_mode_matches_arch
+      - outgoing_edges
+      - edge_instruction_group
+      - cfg_completeness
 
 test-strip-default: &test-strip-default
   test:
     strip_exe: "strip"
     strip: true
-    # We don't check the CFG for stripped binaries, as there are some false
-    # positives in startup code that are hard to filter out.
-    check_cfg: false
+    # some startup code has register calls (e.g. through .init_array)
+    cfg_checks:
+      #- unreachable
+      #- unresolved_branch
+      - cfg_empty
+      - main_is_code
+      - decode_mode_matches_arch
+      - outgoing_edges
+      - edge_instruction_group
+      - cfg_completeness
 
 assembly: &assembly
   <<: *default
@@ -72,9 +96,7 @@ c-object: &c-object
     linker: "gcc"
     flags: []
 
-  test:
-    <<: *default-test
-    check_cfg: false
+
 
 cpp-object: &cpp-object
   <<: *c-object
@@ -85,6 +107,21 @@ cpp-object: &cpp-object
 
   link:
     linker: "g++"
+
+  test:
+    <<: *default-test
+
+    # some code is reachable only through exceptions
+    # virtual call are hard to resolve
+    cfg_checks:
+    #  - unreachable
+    #  - unresolved_branch
+      - cfg_empty
+      - main_is_code
+      - decode_mode_matches_arch
+      - outgoing_edges
+      - edge_instruction_group
+      - cfg_completeness
 
 tests:
 
@@ -105,6 +142,21 @@ tests:
 
   - name: ex_emit_relocs
     <<: *default
+      # Test configuration.
+    test:
+      <<: *default-test
+      # No cfg_completeness for this test
+      # This example has relocations that have already been resolved.
+      cfg_checks:
+        - unreachable
+        - unresolved_branch
+        - cfg_empty
+        - main_is_code
+        - decode_mode_matches_arch
+        - outgoing_edges
+        - edge_instruction_group
+      # - cfg_completeness
+
 
   - name: ex_exceptions1
     <<: *default-cpp
@@ -117,11 +169,6 @@ tests:
 
   - name: ex_false_pointer_array
     <<: *default
-    test:
-      <<: *default-test
-      # TODO: this example fails because function pointers are not resolved in the CFG
-      check_cfg: false
-
 
   - name: ex_float
     <<: *default
@@ -147,12 +194,20 @@ tests:
     test:
       <<: *default-test
       # noreturn may result in unreachable code.
-      check_cfg: false
+      cfg_checks:
+      # - unreachable
+        - unresolved_branch
+        - cfg_empty
+        - main_is_code
+        - decode_mode_matches_arch
+        - outgoing_edges
+        - edge_instruction_group
+        - cfg_completeness
 
-  - name: ex_pointerReatribution
+  - name: ex_pointerReattribution
     <<: *default
 
-  - name: ex_pointerReatribution3
+  - name: ex_pointerReattribution3
     <<: *default
 
   - name: ex_stat
@@ -207,8 +262,19 @@ tests:
       compiler: "gcc"
       flags: ["-shared", "-nostartfiles"]
       skip: false
+
     test:
-      check_cfg: false
+      <<: *default-test
+      # TODO: Revise TLS-related cfg edges
+      cfg_checks:
+        # - unreachable
+        #- unresolved_branch
+        - cfg_empty
+        - main_is_code
+        - decode_mode_matches_arch
+        - outgoing_edges
+        - edge_instruction_group
+        #- cfg_completeness
 
   - name: ex_call_once
     <<: *default-cpp
@@ -239,7 +305,7 @@ tests:
       strip_exe: "strip"
       strip: false
       # CFG checks on static binaries is pretty slow, and a lot of failures (false positives?) in library code.
-      check_cfg: false
+      cfg_checks: []
 
   # # stripped version
   - name: ex1
@@ -257,7 +323,7 @@ tests:
       strip_exe: "strip"
       strip: true
       # CFG checks on static binaries is pretty slow, and a lot of failures (false positives?) in library code.
-      check_cfg: false
+      cfg_checks: []
 
   # ----------------------------------------------------------------------------
   # Small C and C++ examples (stripped).
@@ -314,15 +380,15 @@ tests:
     <<: *default
     <<: *test-strip-default
 
-  - name: ex_pointerReatribution
+  - name: ex_pointerReattribution
     <<: *default
     <<: *test-strip-default
 
-  - name: ex_pointerReatribution2
+  - name: ex_pointerReattribution2
     <<: *default
     <<: *test-strip-default
 
-  - name: ex_pointerReatribution3
+  - name: ex_pointerReattribution3
     <<: *default
     <<: *test-strip-default
 
@@ -353,13 +419,13 @@ tests:
   # ----------------------------------------------------------------------------
   # Assembly examples.
   # ----------------------------------------------------------------------------
-  - name: ex_pointerReatribution3
+  - name: ex_pointerReattribution3
     <<: *assembly
 
-  - name: ex_pointerReatribution3_clang
+  - name: ex_pointerReattribution3_clang
     <<: *assembly
 
-  - name: ex_pointerReatribution3_clang
+  - name: ex_pointerReattribution3_clang
     <<: *assembly
     build:
       c: ["gcc"]
@@ -398,48 +464,52 @@ tests:
     <<: *assembly
     test:
       <<: *default-test
-      check_cfg: false
+      cfg_checks: []
 
   - name: ex_enclosed_instr
     <<: *assembly
     test:
       <<: *default-test
-      check_cfg: false
+      cfg_checks: []
 
   - name: ex_two_data_accesses
     <<: *assembly
     test:
       <<: *default-test
-      check_cfg: false
+      cfg_checks: []
 
   - name: ex_overlapping_nops
     <<: *assembly
     test:
       <<: *default-test
-      check_cfg: false
+      cfg_checks: []
 
   - name: ex_noreturn_use_def
     <<: *assembly
     test:
       <<: *default-test
       # this example has some intentional unreachable code.
-      check_cfg: false
+      cfg_checks: []
 
   - name: ex_synchronous_access3
     <<: *assembly
 
+  - name: ex_plt_nop
+    <<: *assembly
+    flags: ["-no-pie", "-nostartfiles"]
+
   # ----------------------------------------------------------------------------
   # Assembly examples. (stripped)
   # ----------------------------------------------------------------------------
-  - name: ex_pointerReatribution3
+  - name: ex_pointerReattribution3
     <<: *assembly
     <<: *test-strip-default
 
-  - name: ex_pointerReatribution3_clang
+  - name: ex_pointerReattribution3_clang
     <<: *assembly
     <<: *test-strip-default
 
-  - name: ex_pointerReatribution3_pie
+  - name: ex_pointerReattribution3_pie
     <<: *assembly
     <<: *test-strip-default
     build:
@@ -516,6 +586,19 @@ tests:
   - name: ex_false_pointer_array
     <<: *c-object
 
+    test:
+      <<: *default-test
+      # function pointer are not well resolved in object files
+      cfg_checks:
+      # - unreachable
+      # - unresolved_branch
+        - cfg_empty
+        - main_is_code
+        - decode_mode_matches_arch
+        - outgoing_edges
+        - edge_instruction_group
+        - cfg_completeness
+
   - name: ex_float
     <<: *c-object
 
@@ -531,13 +614,13 @@ tests:
   - name: ex_noreturn
     <<: *c-object
 
-  - name: ex_pointerReatribution
+  - name: ex_pointerReattribution
     <<: *c-object
 
-  - name: ex_pointerReatribution2
+  - name: ex_pointerReattribution2
     <<: *c-object
 
-  - name: ex_pointerReatribution3
+  - name: ex_pointerReattribution3
     <<: *c-object
 
   - name: ex_stat
@@ -566,3 +649,12 @@ tests:
     link:
       compiler: "g++"
       flags: ["-lpthread"]
+
+# Tests with special flags
+
+  - name: ex1
+    <<: *default
+    build:
+      <<: *default-build
+      # Test example without PLT
+      flags: ["-fno-plt"]

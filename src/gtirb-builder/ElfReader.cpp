@@ -123,7 +123,7 @@ void ElfReader::resurrectSections()
         S->addFlag(gtirb::SectionFlag::Writable);
         S->addFlag(gtirb::SectionFlag::Initialized);
 
-        std::vector<uint8_t> Bytes = Elf->get_content_from_virtual_address(Addr, Size);
+        auto Bytes = Elf->get_content_from_virtual_address(Addr, Size);
         S->addByteInterval(*Context, gtirb::Addr(Addr), Bytes.begin(), Bytes.end(), Size,
                            Bytes.size());
 
@@ -169,13 +169,10 @@ void ElfReader::resurrectSections()
         GotAddr = It->second;
         GotSize = Size - (GotAddr - Addr);
 
-        std::vector<uint8_t> Bytes = Elf->get_content_from_virtual_address(GotAddr, GotSize);
-        std::vector<uint8_t> BytesCopy = Bytes;
-        std::reverse(BytesCopy.begin(), BytesCopy.end());
+        auto Bytes = Elf->get_content_from_virtual_address(GotAddr, GotSize);
         uint64_t BssRdistance = std::distance(
-            BytesCopy.begin(),
-            find_if(BytesCopy.begin(), BytesCopy.end(), [](auto x) { return x != 0; }));
-        BssDistance = BytesCopy.size() - BssRdistance;
+            Bytes.rbegin(), find_if(Bytes.rbegin(), Bytes.rend(), [](auto x) { return x != 0; }));
+        BssDistance = Bytes.size() - BssRdistance;
 
         GotS->addByteInterval(*Context, gtirb::Addr(GotAddr), Bytes.begin(), Bytes.end(),
                               BssDistance, Bytes.size() - BssRdistance);
@@ -197,7 +194,7 @@ void ElfReader::resurrectSections()
 
         uint64_t DataSize = GotAddr - Addr;
 
-        std::vector<uint8_t> DataBytes = Elf->get_content_from_virtual_address(Addr, DataSize);
+        auto DataBytes = Elf->get_content_from_virtual_address(Addr, DataSize);
         DataS->addByteInterval(*Context, gtirb::Addr(Addr), DataBytes.begin(), DataBytes.end(),
                                DataSize, DataBytes.size());
 
@@ -219,8 +216,7 @@ void ElfReader::resurrectSections()
             DataS2->addFlag(gtirb::SectionFlag::Readable);
             DataS2->addFlag(gtirb::SectionFlag::Writable);
 
-            std::vector<uint8_t> DataBytes2 =
-                Elf->get_content_from_virtual_address(DataAddr, DataSize2);
+            auto DataBytes2 = Elf->get_content_from_virtual_address(DataAddr, DataSize2);
             DataS2->addByteInterval(*Context, gtirb::Addr(DataAddr), DataBytes2.begin(),
                                     DataBytes2.end(), DataSize2, DataBytes2.size());
 
@@ -242,7 +238,7 @@ void ElfReader::resurrectSections()
     {
         // Find the first address starting consecutive zeros,
         // which is highly likely .bss
-        std::vector<uint8_t> Bytes = Elf->get_content_from_virtual_address(GotAddr, GotSize);
+        auto Bytes = Elf->get_content_from_virtual_address(GotAddr, GotSize);
         if(BssDistance >= 0 && BssDistance < Bytes.size())
         {
             uint64_t BssAddr = GotAddr + BssDistance;
@@ -314,7 +310,7 @@ void ElfReader::resurrectSymbols()
     std::map<std::string, uint64_t> DynamicEntries = getDynamicEntries();
 
     // Extract bytes from STRTAB -------------------------------------
-    std::vector<uint8_t> StrTabBytes;
+    LIEF::span<const uint8_t> StrTabBytes;
     auto It = DynamicEntries.find("STRTAB");
     if(It == DynamicEntries.end())
     {
@@ -367,7 +363,7 @@ void ElfReader::resurrectSymbols()
 
         uint64_t Size = DynSymNum * SymTabEntrySize;
 
-        std::vector<uint8_t> Bytes = Elf->get_content_from_virtual_address(Addr, Size);
+        auto Bytes = Elf->get_content_from_virtual_address(Addr, Size);
         auto Iter = Bytes.begin();
 
         // Extract a string at the given Index in STRTAB
@@ -766,7 +762,7 @@ void ElfReader::buildSections()
             }
 
             uint64_t Size = GnuStackSegment->virtual_size();
-            std::vector<uint8_t> Bytes = Elf->get_content_from_virtual_address(Addr, Size);
+            auto Bytes = Elf->get_content_from_virtual_address(Addr, Size);
             gtirb::ByteInterval *BI = S->addByteInterval(*Context, gtirb::Addr(Addr), Bytes.begin(),
                                                          Bytes.end(), Size, Bytes.size());
             auto DataBlock = gtirb::DataBlock::Create(*Context, Size);
@@ -782,7 +778,7 @@ void ElfReader::buildSections()
     }
 
     // Add `overlay` aux data table.
-    if(std::vector<uint8_t> Overlay = Elf->overlay(); Overlay.size() > 0)
+    if(auto Overlay = Elf->overlay(); Overlay.size() > 0)
     {
         Module->addAuxData<gtirb::schema::Overlay>(std::move(Overlay));
     }
@@ -1099,6 +1095,69 @@ const LIEF::ELF::Section *ElfReader::findRelocationSection(const LIEF::ELF::Relo
     }
 }
 
+//-------------------------------------------------------
+// Decision Tree for -shared vs. -pie:
+//
+//           SONAME
+//     yes /        \ no
+//    -shared       DF_1_PIE
+//              yes /      \ no
+//             -pie        .interp
+//                     no /        \ yes
+//                  -shared     missing-mandatory
+//                           yes /         \ no
+//                         -shared        default:-pie
+//-------------------------------------------------------
+#define DYN_MODE_SHARED "SHARED"
+#define DYN_MODE_PIE "PIE"
+std::string ElfReader::inferDynMode()
+{
+    assert(Elf->header().file_type() == LIEF::ELF::E_TYPE::ET_DYN);
+
+    // SONAME is used at compilation time by linker to provide version
+    // backwards-compatibility information, which is used only for shared
+    // objects.
+    std::map<std::string, uint64_t> DynamicEntries = getDynamicEntries();
+    if(DynamicEntries.find("SONAME") != DynamicEntries.end())
+    {
+        return DYN_MODE_SHARED;
+    }
+
+    // Flags used by Solaris.
+    // It must be an EXE if DF_1_PIE (0x800000) bit is set in FLAGS_1.
+    if(auto result = DynamicEntries.find("FLAGS_1"); result != DynamicEntries.end())
+    {
+        if((result->second & 0x8000000) != 0)
+        {
+            return DYN_MODE_PIE;
+        }
+    }
+
+    // Executables should include a `INTERP` segment.
+    // If there is no `INTERP` segment, it should be Shared.
+    auto InterpSegment = std::find_if(Elf->segments().begin(), Elf->segments().end(), [](auto &S) {
+        return S.type() == LIEF::ELF::SEGMENT_TYPES::PT_INTERP;
+    });
+    if(InterpSegment == Elf->segments().end())
+    {
+        return DYN_MODE_SHARED;
+    }
+
+    // Check for dynamic entries mandatory for executables.
+    // If any of the mandatory entries is missing, it should be Shared.
+    if(DynamicEntries.find("RELA") == DynamicEntries.end()
+       || DynamicEntries.find("RELASZ") == DynamicEntries.end()
+       || DynamicEntries.find("RELAENT") == DynamicEntries.end())
+    {
+        return DYN_MODE_SHARED;
+    }
+
+    // Pie by default
+    return DYN_MODE_PIE;
+}
+#undef DYN_MODE_SHARED
+#undef DYN_MODE_PIE
+
 void ElfReader::addAuxData()
 {
     // Add `binaryType' aux data table.
@@ -1107,6 +1166,7 @@ void ElfReader::addAuxData()
     {
         case LIEF::ELF::E_TYPE::ET_DYN:
             BinaryType.emplace_back("DYN");
+            BinaryType.emplace_back(inferDynMode());
             break;
         case LIEF::ELF::E_TYPE::ET_EXEC:
             BinaryType.emplace_back("EXEC");

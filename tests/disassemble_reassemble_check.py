@@ -128,13 +128,15 @@ def build_chroot_wrapper() -> List[str]:
     return wrapper
 
 
-def make(target=""):
+def make(target="") -> List[str]:
     target = [] if target == "" else [target]
 
     if platform.system() == "Linux":
         return build_chroot_wrapper() + ["make", "-e"] + target
     elif platform.system() == "Windows":
         return ["nmake", "/E", "/F", "Makefile.windows"] + target
+    else:
+        raise Exception(f"Unsupported platform {platform.system()}")
 
 
 def compile(
@@ -334,7 +336,7 @@ def disassemble_reassemble_test(
     exec_wrapper=None,
     arch=None,
     extra_ddisasm_flags=[],
-    check_cfg=False,
+    cfg_checks=None,
     upload=True,
 ):
     """
@@ -359,7 +361,7 @@ def disassemble_reassemble_test(
                         compiler,
                         "and",
                         optimization,
-                        *extra_compile_flags
+                        *extra_compile_flags,
                     )
                 )
                 if not compile(
@@ -384,14 +386,11 @@ def disassemble_reassemble_test(
                 )
 
                 # Do some GTIRB checks
-                module = gtirb.IR.load_protobuf(gtirb_filename).modules[0]
-                if check_cfg:
-                    gtirb_errors += check_gtirb.check_cfg(module)
-
-                gtirb_errors += check_gtirb.check_main_is_code(module)
-                gtirb_errors += check_gtirb.check_decode_mode_matches_arch(
-                    module
-                )
+                if success:
+                    module = gtirb.IR.load_protobuf(gtirb_filename).modules[0]
+                    gtirb_errors += check_gtirb.run_checks(
+                        module, cfg_checks or []
+                    )
 
                 if upload:
                     asm_db.upload(

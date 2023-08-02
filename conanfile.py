@@ -73,10 +73,11 @@ class DdisasmConan(Properties, ConanFile):
     author = "GrammaTech Inc."
     generators = "cmake"
     settings = ("os", "compiler", "build_type", "arch")
+    options = {"run_tests": [True, False, None]}
 
-    lief_version = "0.12.3"
+    lief_version = "0.13.0"
     libehp_version = "0.1.1-gt3"
-    souffle_version = "2.3"
+    souffle_version = "2.4"
     build_requires = (
         "libehp/%s@rewriting+extra-packages/stable" % (libehp_version),
         "lief/%s@rewriting+extra-packages/stable" % (lief_version),
@@ -102,7 +103,7 @@ class DdisasmConan(Properties, ConanFile):
     def imports(self):
         self.copy("*.dll", "bin", "bin")
 
-    def configure(self):
+    def validate(self):
         if (
             self.settings.compiler == "gcc"
             and self.settings.compiler.libcxx != "libstdc++11"
@@ -158,15 +159,17 @@ class DdisasmConan(Properties, ConanFile):
             ] = "/DBOOST_ALL_NO_LIB /DBOOST_UUID_FORCE_AUTO_LINK"
             self.add_dep_lib_path("libffi")
         else:
-            cmake = CMake(self, generator=None, parallel=False)
-            defs.update({"GTIRB_PPRINTER_STRIP_DEBUG_SYMBOLS:BOOL": "ON"})
-
+            cmake = CMake(self, generator=None, parallel=True)
+            defs.update(
+                {
+                    "GTIRB_PPRINTER_STRIP_DEBUG_SYMBOLS:BOOL": "ON",
+                    "DDISASM_GENERATE_MANY": "ON",
+                }
+            )
         revision = os.environ.get("CI_COMMIT_SHORT_SHA")
         if revision:
             defs["DDISASM_BUILD_REVISION"] = revision
 
-        if self.settings.build_type == "Release":
-            cmake.build_type = "RelWithDebInfo"
         self.add_dep_bin_path("gtirb-pprinter", "mcpp")
         self.add_dep_lib_path("gtirb-pprinter", "gtirb", "capstone")
         bin_dir = os.path.join(os.getcwd(), "bin")
@@ -175,12 +178,16 @@ class DdisasmConan(Properties, ConanFile):
         cmake.configure(source_folder=".", defs=defs)
         cmake.build()
 
+        run_tests = (
+            self.options.run_tests or self.options.run_tests == None
+        )  # noqa: E711
+
         # Using the CMAKE_CTEST_ARGUMENTS environment variable to pass args to
         # ctest would allow us to use `cmake.test()` and `--verbose`, but it
         # is new in CMake 3.17 (newer than what is available in our Windows
         # test runner). As a workaround, we run ctest directly.
         # https://cmake.org/cmake/help/latest/variable/CMAKE_CTEST_ARGUMENTS.html#cmake-ctest-arguments
-        if self.settings.build_type == "Release":
+        if run_tests:
             with tools.vcvars(self.settings, arch="x86_64"):
                 self.run(["ctest", "--verbose"], cwd=cmake.build_folder)
             # FIXME: https://github.com/conan-io/conan/issues/3673
