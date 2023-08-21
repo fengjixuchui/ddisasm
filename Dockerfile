@@ -191,6 +191,11 @@ COPY --from=ddisasm /lib/x86_64-linux-gnu/libprotobuf.so* /lib/x86_64-linux-gnu/
 COPY --from=ddisasm /usr/local/bin/ddisasm /usr/local/bin/
 COPY --from=ddisasm /usr/local/bin/gtirb* /usr/local/bin/
 
+# gcc is needed to rebuild binaries with gtirb-pprinter
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+        gcc \
+        libc6-dev
+
 ENV LD_LIBRARY_PATH=/usr/local/lib
 
 # `grep -v 'UNKNOWN'`: return a failure code if the version string contains 'UNKNOWN'
