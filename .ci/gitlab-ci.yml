@@ -270,7 +270,7 @@ python-manylinux-2010-publish-internal:
         python3 delete_remote_packages.py $GL_PKG_API_TOKEN ddisasm-*.whl;
       fi
     - twine check ddisasm-*.whl
-    - twine upload --verbose --repository repypi ddisasm-*.whl
+    - twine upload --verbose --repository repypi ddisasm-*.whl --skip-existing
 
 python-manylinux-2010-publish-external:
   stage: deploy
@@ -283,7 +283,7 @@ python-manylinux-2010-publish-external:
     - VERSION=$(python3 -c "import ddisasm; print(ddisasm.__version__)")
     # Do not publish .dev versions on the public pypi
     - if [[ "$VERSION" =~ \.dev[[:digit:]]*.*$ ]]; then exit 1; fi
-    - python3 -m twine upload --verbose ddisasm-*.whl -u __token__ -p $PYPI_API_KEY
+    - python3 -m twine upload --verbose ddisasm-*.whl -u __token__ -p $PYPI_API_KEY --skip-existing
   rules:
     - if: '$CI_COMMIT_REF_NAME =~ /^release-.*/'
 
@@ -821,15 +821,15 @@ docker-image-vars:
   script:
     - GTIRB_BRANCH=$([[ $CI_COMMIT_REF_NAME =~ ^release-.* ]] && echo "release-$GTIRB_VERSION" || echo "master")
     - GTIRB_PPRINTER_BRANCH=$([[ $CI_COMMIT_REF_NAME =~ ^release-.* ]] && echo "release-$GTIRB_PPRINTER_VERSION" || echo "master")
-    - echo "VERSION=$(awk '{s=(NR==1?s:s".")$2}END{print s}' version.txt)" >> .env
+    - VERSION=$(awk '{s=(NR==1?s:s".")$2}END{print s}' version.txt)
     - echo "GTIRB_BRANCH=$GTIRB_BRANCH" >> .env
     - echo "GTIRB_PPRINTER_BRANCH=$GTIRB_PPRINTER_BRANCH" >> .env
     - echo "GTIRB_COMMIT=$(git ls-remote https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/rewriting/gtirb | grep "refs/heads/$GTIRB_BRANCH\$" | awk '{print $1}')" >> .env
     - echo "GTIRB_PPRINTER_COMMIT=$(git ls-remote https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/rewriting/gtirb-pprinter | grep "refs/heads/$GTIRB_PPRINTER_BRANCH\$" | awk '{print $1}')" >> .env
     - >-
       if [[ $CI_COMMIT_REF_NAME =~ ^release-.* ]]; then
-        echo "DOCKER_LOCAL_VERSION_DEST=--destination=${DOCKER_REGISTRY}/${CI_PROJECT_PATH}:$VERSION\ --destination=${DOCKER_REGISTRY}/${CI_PROJECT_PATH}:latest" >> .env
-        echo "DOCKER_HUB_VERSION_DEST=--destination=grammatech/ddisasm:$VERSION\ --destination=grammatech/ddisasm:latest" >> .env
+        echo "DOCKER_LOCAL_VERSION_DEST=--destination=${DOCKER_REGISTRY}/${CI_PROJECT_PATH}:${VERSION} --destination=${DOCKER_REGISTRY}/${CI_PROJECT_PATH}:latest" >> .env
+        echo "DOCKER_HUB_VERSION_DEST=--destination=grammatech/ddisasm:${VERSION} --destination=grammatech/ddisasm:latest" >> .env
       elif [[ $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH ]]; then
         echo "DOCKER_LOCAL_VERSION_DEST=--destination=${DOCKER_REGISTRY}/${CI_PROJECT_PATH}:unstable" >> .env
         echo "DOCKER_HUB_VERSION_DEST=--destination=grammatech/ddisasm:unstable" >> .env
