@@ -1,5 +1,10 @@
 # 1.7.1 (Unreleased)
 
+* Support GTIRB sections with holes (byte intervals only covering part of the section).
+* Use pre-existing code blocks as hints when disassembling a RAW binary.
+* Better data access computation for MIPS binaries.
+* Detect incremental linking regions in PE binaries.
+
 # 1.7.0
 * Update code inference to use weighted interval scheduling to resolve blocks;
   this improves code inference results, especially on ARM.

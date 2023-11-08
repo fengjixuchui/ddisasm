@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Optional, Tuple
 from gtirb.cfg import EdgeType
 import gtirb
+import lief
 
-if platform.system() == "Linux":
-    import lief
+from tests.snippets import parse_souffle_output
 
 ex_dir = Path("./examples/")
 ex_asm_dir = ex_dir / "asm_examples"
@@ -836,6 +836,84 @@ class NpadTests(unittest.TestCase):
             )
             sizes = [n for _, n in padding]
             self.assertEqual(sizes, list(range(1, 16)))
+
+
+class IncrementalLinkingTests(unittest.TestCase):
+    @unittest.skipUnless(
+        platform.system() == "Windows", "This test is Windows only."
+    )
+    def test_incremental_linking_boundaries(self):
+        with cd(ex_dir / "ex1"):
+            self.assertTrue(
+                compile("cl", "cl", "/O0", ["/link", "/incremental"], [])
+            )
+            self.assertTrue(
+                disassemble(
+                    "ex.exe",
+                    format="--ir",
+                    extra_args=["--with-souffle-relations"],
+                )[0]
+            )
+
+            ir = gtirb.IR.load_protobuf("ex.exe.gtirb")
+            module = ir.modules[0]
+
+            # Read first and last address in incremental linking code.
+            first, last = next(
+                parse_souffle_output(module, "incremental_linking")
+            )
+
+            # locate the .text section byte interval.
+            section = next(s for s in module.sections if s.name == ".text")
+            bi = next(section.byte_intervals_at(section.address))
+
+            # Pattern match INT3 + JMP sequence prepended to .text section.
+            match = re.match(b"^\xCC+(\xe9....)+", bi.contents, re.DOTALL)
+            self.assertTrue(match)
+
+            # Test boundaries of the inferred span against matched code.
+            code = bi.contents[match.start() : match.end()].lstrip(b"\xCC")
+            offset = match.end() - len(code)
+            self.assertEqual(section.address + offset, first)
+            self.assertEqual(last - first + 5, len(code))
+
+
+class MalformedPEBinaries(unittest.TestCase):
+    @unittest.skipUnless(
+        platform.system() == "Windows", "This test is Windows only."
+    )
+    def test_repeated_import(self):
+        """
+        Test a binary with repeated import entries
+        """
+        with cd(ex_dir / "ex1"):
+            self.assertTrue(compile("cl", "cl", "/O0", ["/link"], []))
+
+            # We add a duplicate import entry
+            bin = lief.PE.parse("ex.exe")
+            lib = bin.add_library("KERNEL32.dll")
+            lib.add_entry("WriteConsoleW")
+            builder = lief.PE.Builder(bin)
+            builder.build_imports(True).patch_imports(True)
+            builder.build()
+            builder.write("ex_mod.exe")
+
+            self.assertTrue(
+                disassemble(
+                    "ex_mod.exe",
+                    format="--ir",
+                )[0]
+            )
+
+            # No duplicate import symbols
+            ir = gtirb.IR.load_protobuf("ex_mod.exe.gtirb")
+            module = ir.modules[0]
+            self.assertEqual(
+                len(list(module.symbols_named("WriteConsoleW"))), 1
+            )
+            # LIEF does non-standard things with the IAT.
+            # This makes reassembling into a working binary challenging
+            # so we don't check that here.
 
 
 if __name__ == "__main__":
